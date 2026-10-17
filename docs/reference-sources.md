@@ -1,10 +1,6 @@
-# Gameplay references
+## Reference material
 
-Static audit, 16 October 2026; target: recovered **123.5.1**. Start source-first; resolve conflicts/gaps with period documentation/footage. No official provenance, fidelity, runtime/security certification or gameplay change is claimed.
-
-## Pinned sources
-
-Prefer Trapped (older numeric IDs), realm-src (readable states), FSoD (coverage); compare feature-specific engine/XML semantics. Licenses below are observations, not file/asset reuse clearance; **none** means no repository-wide grant found.
+Prefer Trapped (older numeric IDs), realm-src (readable states), FSoD (coverage); compare feature-specific engine/XML semantics. 
 
 | Pin | Use/caveats | License |
 | --- | --- | --- |
@@ -28,17 +24,6 @@ Prefer Trapped (older numeric IDs), realm-src (readable states), FSoD (coverage)
 Boss sample: Ent Ancient, Lich, Ghost King, Phoenix Lord. All four tables were located in 13 server sources; realm-cli is client-only, NR-CORE removes the behavior library, and betterSkillys received version/lineage triage only—not verified four-boss coverage. Line-ending-normalized matches: Rotux↔FSoD (four); Club559 logic/db↔Trapped (four), logicUpd/db↔Kithio (four); Seraph↔Project-B (Ghost/Phoenix); MMOEmpire↔Trapped (Ghost/Lich/Phoenix). **Not independent corroboration.**
 
 Discovery: https://docs.realmdex.com/sources.html (“Skillys V1?”→realm-src/realm-cli). Hidden “Skilly's 7.0 NR-Core”/“Educational” links remain unidentified; don't equate with betterSkillys. Zero.Gdk returned 404; no verdict/pin.
-
-## Concrete discrepancies
-
-Anchors: pinned `wServer/logic/db/BehaviorDb.{EntAncient,Lich,GhostKing,Phoenix}.cs`; Trapped also `wServer/logic/Behavior.cs`.
-
-- **Ent:** Trapped Actual Ent grows after 2000ms, then 1600ms steps; FSoD uses HP fractions despite matching ten projectile forms.
-- **Lich:** Trapped `DamageLesserEqual` measures max−current HP against 4500/14400/37500, not nearby-player count; later files use HP fractions. Compare evaluation, summon gates and vulnerability separately.
-- **Ghost:** FSoD Ghost Master changes attacks at .99/.98/.94 HP; orders Ghost King into `Killed`, transforming to Actual Ghost King—not simply “kill minions.”
-- **Phoenix:** Trapped Birdmen seek `0x678` (selected XML: Oasis Giant), versus later `Protect("Phoenix Lord")`. Investigate; don't copy. Egg shielding: Trapped 1500ms/FSoD 2000ms; both Lord→Egg→Reborn.
-
-Trapped `Cooldown` randomizes initial/subsequent delays; `CooldownExact`/FSoD cooldown semantics differ. Transmute/Transform replace entities: preserve ownership, damage/loot and once-only quest/closure credit.
 
 ## Implementation contract
 

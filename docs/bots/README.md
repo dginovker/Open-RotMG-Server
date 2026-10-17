@@ -1,9 +1,3 @@
-# Gameplay bots: vision and research
-
-PR32's crews are merged; this inland candidate is unmerged and undeployed.
-
-The two video reports record observations and limits; `research/decision-spike.md` records the earlier offline experiment.
-
 ## Local autonomous crews
 
 Run `./run.sh 18923 --release`, then enter the Realm normally. Mossy leads Bayleaf/Trellis; Reed leads Juniper/Bramble. Profiles weigh recovery, resources and companions differently. They use restricted observations and ordinary movement, combat, inventory, XP, teleport and transfer rules. Uninvited humans are not permanent anchors. Native local chat `Trellis follow me` requests a temporary follow while the sender is visible.
