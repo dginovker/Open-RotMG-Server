@@ -2,8 +2,13 @@
 name = "openrotmg"
 version = "0.1.0"
 edition = "2024"
+default-run = "openrotmg"
 rust-version = "1.88"
 license = "AGPL-3.0-only"
+
+[[bin]]
+name = "openrotmg-build100"
+path = "src/build100/main.rs"
 
 [dependencies]
 anyhow = "1"

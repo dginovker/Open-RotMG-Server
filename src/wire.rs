@@ -155,9 +155,12 @@ impl Default for Codec {
 }
 impl Codec {
     pub fn server() -> Self {
+        Self::server_with_keys(CLIENT_OUT, CLIENT_IN)
+    }
+    pub fn server_with_keys(client_out: &[u8], client_in: &[u8]) -> Self {
         Self {
-            incoming: Rc4::new(CLIENT_OUT),
-            outgoing: Rc4::new(CLIENT_IN),
+            incoming: Rc4::new(client_out),
+            outgoing: Rc4::new(client_in),
             buffer: Vec::new(),
         }
     }
