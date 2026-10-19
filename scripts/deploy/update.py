@@ -409,8 +409,8 @@ def deploy(stage, work, metadata, config):
     require(main_revision() == metadata['revision'], 'Main advanced during rehearsal; no cutover performed')
     with LAST_BACKUP.with_name('backup.lock').open('rb') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        outcome(work, 'cutover', stage)
         warn_restart(config)
+        outcome(work, 'cutover', stage)
         run('systemctl', 'stop', 'openrotmg.service')
         require(subprocess.check_output(['systemctl', 'show', 'openrotmg', '-p', 'Result', '--value'], text=True).strip() == 'success', 'Shutdown save failed; no source exchange performed')
         frozen = work / 'cutover'
