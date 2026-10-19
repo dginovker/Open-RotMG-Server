@@ -79,6 +79,13 @@ def active_paths():
 
 def retain_deployments(apply=True):
     attempts, metadata, pinned = {}, {}, []
+    cache = ROOT / 'release-manifests'
+    require(not cache.is_symlink() and (not cache.exists() or cache.is_dir()), 'Unsafe release manifest cache')
+    for path in cache.glob('*.json'):
+        require(not path.is_symlink() and re.fullmatch('[0-9a-f]{40}\\.json', path.name), 'Unsafe cached manifest path')
+        value = json.loads(path.read_text())
+        require(value['format'] == 1 and path.stem == value['revision'], 'Invalid cached release manifest')
+        metadata[path.stem] = value
     for work in sorted(ROOT.iterdir(), key=lambda p: p.name):
         if not re.fullmatch('[0-9a-f]{40}-[0-9]+', work.name):
             continue
@@ -162,6 +169,7 @@ def retain_deployments(apply=True):
             if not re.fullmatch('[0-9a-f]{40}', bundle.name) or bundle == current or bundle.name in revisions:
                 continue
             if any(bundle == p or bundle in p.parents for p in running):
+                revisions.add(bundle.name)
                 continue
             mapping = {'backup.py': 'scripts/backups/backup.py', 'openrotmg': 'openrotmg', 'REVISION': 'REVISION',
                        'openrotmg-backup.sh': 'scripts/backups/openrotmg-backup.sh'}
@@ -170,8 +178,10 @@ def retain_deployments(apply=True):
             valid = all(n in manifest for n in mapping.values()) and bundle.is_dir() and not bundle.is_symlink()
             if not valid or any(p.is_symlink() for p in bundle.rglob('*')) or files(bundle) != {n: manifest[s] for n, s in mapping.items()}:
                 pinned.append({'path': str(bundle), 'reason': 'backup tool provenance requires review'})
+                revisions.add(bundle.name)
                 continue
             remove.add(bundle)
+    remove.update(p for p in cache.glob('*.json') if p.stem not in revisions)
     result = {'retention': 'applied' if apply else 'dry_run', 'remove': sorted(str(p) for p in remove),
               'kept_attempts': len(keep), 'unresolved_attempts': sum(r is None or r['state'] not in {'success', 'failed', 'artifact_only'}
                   or (w / 'retain').exists() or (w / 'rehearsal-running').exists() for w, r in attempts.items()),
@@ -181,8 +191,17 @@ def retain_deployments(apply=True):
         result['retention'] = 'applying'
         temporary.write_text(json.dumps(result) + '\n')
         temporary.replace(ROOT / 'retention.json')
+        # Rollback manifests must outlive the retired attempts that originally delivered them.
+        cache.mkdir(mode=0o700, exist_ok=True)
+        for revision in revisions & metadata.keys():
+            source = cache / (revision + '.json.new')
+            source.write_text(json.dumps(metadata[revision]) + '\n')
+            source.replace(cache / (revision + '.json'))
         for path in sorted(remove, key=str):
-            shutil.rmtree(path)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
         result['retention'] = 'applied'
         temporary.write_text(json.dumps(result) + '\n')
         temporary.replace(ROOT / 'retention.json')

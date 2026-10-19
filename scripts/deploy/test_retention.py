@@ -92,6 +92,26 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual((self.data / 'game.db').read_bytes(), b'live database')
         self.assertEqual((self.data / 'server.pem').read_bytes(), b'live key')
 
+    def test_many_successful_updates_remain_bounded_including_metadata_and_tools(self):
+        update.retain_deployments()
+        for n in range(9, 30):
+            self.work(n)
+            shutil.rmtree(self.live)
+            self.write_release(self.live, n)
+            previous = self.tools / 'releases' / self.rev(n - 1)
+            bundle = self.tools / 'releases' / self.rev(n)
+            shutil.copytree(previous, bundle)
+            (bundle / 'openrotmg').write_bytes(self.contents(n)['openrotmg'])
+            (bundle / 'REVISION').write_bytes(self.contents(n)['REVISION'])
+            (self.tools / 'current').unlink()
+            (self.tools / 'current').symlink_to(bundle)
+            result = update.retain_deployments()
+            self.assertEqual(result['review'], [])
+            self.assertEqual(result['kept_attempts'], 3)
+            self.assertEqual(len(list(self.root.glob('server-stage-*'))), 2)
+            self.assertEqual(len(list((self.tools / 'releases').iterdir())), 4)
+            self.assertEqual(len(list((self.attempts / 'release-manifests').iterdir())), 4)
+
     def test_only_latest_three_pre_cutover_failure_sets_survive(self):
         rows = [self.work(n, 'failed') for n in range(10, 16)]
         update.retain_deployments()
