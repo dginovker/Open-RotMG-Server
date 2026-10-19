@@ -23,8 +23,9 @@ class RetentionTest(unittest.TestCase):
         self.patch = patch.multiple(update, ROOT=self.attempts, LIVE=self.live, BACKUPS=self.tools)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        self.running = patch.object(update, 'active_paths', return_value=set()).start()
-        self.addCleanup(patch.stopall)
+        process_patch = patch.object(update, 'active_paths', return_value=set())
+        self.running = process_patch.start()
+        self.addCleanup(process_patch.stop)
         self.work(0, 'failed', stage=False)
         for n in range(1, 9):
             self.work(n)
@@ -190,6 +191,30 @@ class RetentionTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Invalid successful cutover receipt'):
             update.retain_deployments()
         self.assertTrue(work.exists())
+
+    def test_cleanup_failure_keeps_the_exact_plan_and_is_not_silently_retried(self):
+        with patch.object(update.shutil, 'rmtree', side_effect=OSError('deletion failed')):
+            with self.assertRaisesRegex(OSError, 'deletion failed'):
+                update.retain_deployments()
+        proof = json.loads((self.attempts / 'retention.json').read_text())
+        self.assertEqual(proof['retention'], 'applying')
+        self.assertTrue(proof['remove'])
+
+    def test_successful_deploy_cleanup_error_is_not_retried_or_reclassified(self):
+        import test_update
+        with test_update.UpdateTest().deployment() as (raw, metadata, live, work):
+            def activate(stage, attempt, *_):
+                old = live.with_name('old')
+                live.rename(old)
+                stage.rename(live)
+                old.rename(stage)
+            with patch.object(update, 'deploy', side_effect=activate), patch.object(
+                    update, 'retain_deployments', side_effect=[None, RuntimeError('cleanup failed')]) as cleanup:
+                with self.assertRaisesRegex(RuntimeError, 'cleanup failed'):
+                    update.main('a' * 40, raw)
+            self.assertEqual(cleanup.call_count, 2)
+            attempt = next(work.glob('a' * 40 + '-*'))
+            self.assertEqual(json.loads((attempt / 'outcome.json').read_text())['state'], 'success')
 
     def test_changed_or_unknown_backup_tool_bundle_is_reported_not_deleted(self):
         changed = self.tools / 'releases' / self.rev(2)

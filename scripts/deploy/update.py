@@ -177,9 +177,13 @@ def retain_deployments(apply=True):
                   or (w / 'retain').exists() or (w / 'rehearsal-running').exists() for w, r in attempts.items()),
               'review': pinned}
     if apply and attempts:
+        temporary = ROOT / 'retention.json.new'
+        result['retention'] = 'applying'
+        temporary.write_text(json.dumps(result) + '\n')
+        temporary.replace(ROOT / 'retention.json')
         for path in sorted(remove, key=str):
             shutil.rmtree(path)
-        temporary = ROOT / 'retention.json.new'
+        result['retention'] = 'applied'
         temporary.write_text(json.dumps(result) + '\n')
         temporary.replace(ROOT / 'retention.json')
     print(json.dumps(result), flush=True)
@@ -485,10 +489,11 @@ def main(desired, raw):
             receipt = json.loads((work / 'outcome.json').read_text())
             if receipt['state'] != 'success':
                 stage = Path(receipt['stage']) if receipt['stage'] is not None else None
-                safe = receipt['state'] == 'preparing' and stage is not None and not (work / 'rehearsal-running').exists()
+                safe = receipt['state'] == 'preparing' and stage is not None and not any((work / n).exists() for n in
+                    ['rehearsal-running', 'drain-receipt.json', 'cutover', 'previous-server-path', 'post-stop-failure.json'])
                 safe = safe and (not stage.exists() or files(stage) == metadata['manifest'])
                 outcome(work, 'failed' if safe else 'pinned', stage, str(error))
-            retain_deployments()
+                retain_deployments()
         activated = (LIVE / 'REVISION').read_text().strip() == desired
         state = 'activated_unverified' if activated else 'failed'
         status(state, desired, recovery_directory=str(work) if work is not None else None, error=str(error))
