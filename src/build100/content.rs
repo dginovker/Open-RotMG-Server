@@ -261,6 +261,46 @@ impl Object {
         crate::rules::combat::projectile_position(projectile, (0., 0.), 0., 1, 0.)?;
         Ok(projectile)
     }
+    pub fn quiver_projectile(&self) -> Result<&Projectile> {
+        ensure!(
+            matches!(self.id, 0xa61 | 0xa62)
+                && self.class == "Equipment"
+                && self.slot_type == Some(15)
+                && !self.consumable
+                && self.activations.len() == 1
+                && self.activations[0].action()? == Action::Shoot
+                && self.num_projectiles == 1
+                && self.rate_of_fire.is_none()
+                && self.arc_gap_radians == std::f32::consts::PI / 16.
+                && self.bonuses.is_empty()
+                && self.projectiles.len() == 1,
+            "unsupported normal quiver shape"
+        );
+        let projectile = self.unique_projectile(0)?;
+        let slow = [ConditionEffect {
+            condition: Condition::Slowed,
+            duration_seconds: 3.,
+        }];
+        ensure!(
+            self.effects == slow
+                && projectile.effects == slow
+                && projectile.features == ["ConditionEffect"]
+                && !projectile.continues
+                && !projectile.wavy
+                && projectile.amplitude == 0.
+                && projectile.frequency == 1.
+                && projectile.visual == "Red Arrow"
+                && projectile.speed == 15.
+                && projectile.lifetime == 1.
+                && self.root_damage == Some((projectile.min, projectile.max))
+                && projectile.min >= 0
+                && projectile.min <= projectile.max
+                && projectile.max <= i32::from(i16::MAX)
+                && self.mp_cost.is_some_and(|cost| cost >= 0),
+            "unsupported normal quiver root/projectile semantics"
+        );
+        Ok(projectile)
+    }
     pub fn single_activation(&self) -> Result<&Activation> {
         ensure!(
             self.activations.len() == 1,
