@@ -34,3 +34,9 @@ JS
 Export the port/profile variables; jobs outside Pi must supply an explicit `PI_BROWSER_OWNER`. Use managed target creation/activity helpers. Close owned targets/Chrome before stopping the owned compositor; preserve profiles. Do not use host `Page.bringToFront`, `Target.activateTarget` or MCP `bringToFront:true`. Focus emulation alone does not guarantee render cadence: verify actual frames and native outcomes, without host activation as repair. Xvfb alone failed native rendering here (WebGL blocklisting/AVM2 errors); do not silently substitute it or relax GPU/security flags.
 
 Rust recipes compile with the existing tests. No browser dependency is bundled: use your existing browser-scoped connection, never desktop input. Keep generated state, media and exploratory scripts outside Git.
+
+```sh
+# Run in the qualified build environment; retain outside the shared cache.
+python3 scripts/cargo.py --output "${RETAINED_BINARY:?Set an output path outside the cache}" \
+  --output-bin openrotmg-build100 build --locked -p openrotmg-build100 --bin openrotmg-build100
+```
