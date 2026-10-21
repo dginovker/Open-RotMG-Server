@@ -577,6 +577,7 @@ pub struct Avatar {
     move_credit: f32,
     known_ground: BTreeSet<(i16, i16)>,
     known_objects: BTreeSet<i32>,
+    enemy_view_repair: Option<i32>,
 }
 #[derive(Clone)]
 struct ShorePirate {
@@ -922,6 +923,21 @@ impl Room {
             },
         )
     }
+    fn repairable_enemy(&self, viewer: i32, target: i32, content: &Content) -> Result<bool> {
+        let avatar = &self.players[&viewer];
+        let p = &avatar.character;
+        if self.map.is_none() || !p.alive || !avatar.known_objects.contains(&target) {
+            return Ok(false);
+        }
+        let Some(e) = self.entities.get(&target) else {
+            return Ok(false);
+        };
+        let def = content.get(e.kind)?;
+        Ok(def.is_enemy
+            && def.class == "Character"
+            && e.stats.get(&1).is_some_and(|&hp| hp > 0)
+            && distance(p.x, p.y, e.x, e.y) <= 16.)
+    }
     // Reconcile before events so neither Shoot nor Tick can refer to an unpublished owner.
     pub fn publication(
         &mut self,
@@ -971,7 +987,12 @@ impl Room {
                 removed_owners.insert(id);
             }
         }
+        let repair = match self.players[&viewer].enemy_view_repair {
+            Some(id) if self.repairable_enemy(viewer, id, content)? => Some(id),
+            _ => None,
+        };
         let avatar = self.players.get_mut(&viewer).context("viewer missing")?;
+        avatar.enemy_view_repair = None;
         let mut out: Vec<_> = events
             .iter()
             .filter(|p| p.id == 1)
@@ -986,6 +1007,16 @@ impl Room {
                     w.i16(xx).i16(yy).u8(0).u8(kind);
                 }));
             }
+        }
+        if let Some(id) = repair {
+            // Positive HP Tick and duplicate Make cannot clear the native instance's sticky dead flag.
+            out.push(drop_object(id));
+            avatar.known_objects.remove(&id);
+            tracing::debug!(
+                viewer,
+                target = id,
+                "build100 enemy view repair; not authoritative resurrection"
+            );
         }
         for (&id, p) in &visible {
             if !avatar.known_objects.contains(&id) {
@@ -1298,6 +1329,7 @@ impl Room {
                 move_credit: MOVE_DISTANCE_CREDIT,
                 known_ground: BTreeSet::new(),
                 known_objects: BTreeSet::new(),
+                enemy_view_repair: None,
             },
         );
         if self.map.is_some() {
@@ -1836,6 +1868,12 @@ impl Room {
         if p.id == 28 {
             return self.teleport(player, super::protocol::teleport(&p.body)?, content, now);
         }
+        if p.id == 9 {
+            ensure!(
+                p.body.len() == 13,
+                "native Damage9 requires exactly 13 bytes"
+            );
+        }
         if !self.character(player).alive {
             tracing::debug!(
                 id = p.id,
@@ -2017,13 +2055,23 @@ impl Room {
             }
             9 => {
                 // Native collision reports are advisory; the server advances and resolves its own projectiles.
-                r.i32()?;
-                r.u8()?;
-                r.u8()?;
-                r.i16()?;
-                r.u8()?;
-                r.i32()?;
+                let target = r.i32()?;
+                let condition = r.u8()?;
+                let _duration = r.u8()?;
+                let _amount = r.i16()?;
+                let bullet = r.u8()?;
+                let source = r.i32()?;
                 r.done()?;
+                if source == player
+                    && (1..=96).contains(&bullet)
+                    && condition == super::content::Condition::Dead as u8
+                    && self.repairable_enemy(player, target, content)?
+                {
+                    self.players
+                        .get_mut(&player)
+                        .expect("attached avatar")
+                        .enemy_view_repair = Some(target);
+                }
             }
             14 => {
                 let a = (r.i32()?, r.u8()?, r.i16()?);
@@ -3677,3 +3725,7 @@ pub(crate) mod shore_runtime_tests;
 #[cfg(test)]
 #[path = "healnova_runtime_tests.rs"]
 mod healnova_runtime_tests;
+
+#[cfg(test)]
+#[path = "prediction_runtime_tests.rs"]
+pub(crate) mod prediction_runtime_tests;
