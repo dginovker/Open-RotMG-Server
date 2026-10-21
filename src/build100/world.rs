@@ -578,6 +578,7 @@ pub struct Avatar {
     known_ground: BTreeSet<(i16, i16)>,
     known_objects: BTreeSet<i32>,
     enemy_view_repair: Option<i32>,
+    quiver_ack: Option<i16>,
 }
 #[derive(Clone)]
 struct ShorePirate {
@@ -596,6 +597,7 @@ pub struct Room {
     entities: BTreeMap<i32, Entity>,
     bullets: Vec<Bullet>,
     server_projectile_cursors: BTreeMap<i32, u8>,
+    enemy_slows: BTreeMap<i32, f32>,
     shore: Option<ShorePopulation>,
     rng: StdRng,
     next_id: i32,
@@ -972,9 +974,14 @@ impl Room {
                 player_stats.insert(id, stats);
             }
         }
+        let entity_stats = self
+            .entities
+            .values()
+            .map(|e| Ok((e.id, self.entity_wire_stats(e, content)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         for e in self.entities.values() {
             if distance(x, y, e.x, e.y) <= 16. {
-                visible.insert(e.id, make(e.id, e.kind, "", e.x, e.y, &e.stats));
+                visible.insert(e.id, make(e.id, e.kind, "", e.x, e.y, &entity_stats[&e.id]));
             }
         }
         // A known owner can shoot and retire in this frame; its shot must precede its actual Drop.
@@ -1073,7 +1080,7 @@ impl Room {
                         status(w, id, p.x, p.y, &player_stats[&id]);
                     } else {
                         let e = &self.entities[&id];
-                        status(w, id, e.x, e.y, &e.stats);
+                        status(w, id, e.x, e.y, &entity_stats[&id]);
                     }
                 }
             }));
@@ -1186,6 +1193,7 @@ impl Room {
                         p.alive = false;
                         p.clear_dead_hp_carry();
                         avatar.weapon.pending = None;
+                        avatar.quiver_ack = None;
                         tracing::info!(
                             avatar = id,
                             generation = p.generation,
@@ -1257,6 +1265,7 @@ impl Room {
             entities: BTreeMap::new(),
             bullets: vec![],
             server_projectile_cursors: BTreeMap::new(),
+            enemy_slows: BTreeMap::new(),
             shore: None,
             rng: StdRng::seed_from_u64(seed),
             next_id: base + 100,
@@ -1330,6 +1339,7 @@ impl Room {
                 known_ground: BTreeSet::new(),
                 known_objects: BTreeSet::new(),
                 enemy_view_repair: None,
+                quiver_ack: None,
             },
         );
         if self.map.is_some() {
@@ -1460,7 +1470,31 @@ impl Room {
         self.next_wave = self.elapsed + 8.;
         Ok(())
     }
+    fn entity_wire_stats(&self, e: &Entity, content: &Content) -> Result<BTreeMap<u8, i32>> {
+        let mut stats = e.stats.clone();
+        let def = content.get(e.kind)?;
+        if def.is_enemy && def.class == "Character" {
+            stats.insert(
+                29,
+                if self
+                    .enemy_slows
+                    .get(&e.id)
+                    .is_some_and(|remaining| *remaining > 0.)
+                {
+                    8
+                } else {
+                    0
+                },
+            );
+        }
+        Ok(stats)
+    }
     fn tick(&self, content: &Content) -> Result<Packet> {
+        let entity_stats = self
+            .entities
+            .values()
+            .map(|e| Ok((e.id, self.entity_wire_stats(e, content)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let stats = self
             .players
             .iter()
@@ -1479,7 +1513,7 @@ impl Room {
                 }
             }
             for e in self.entities.values() {
-                status(w, e.id, e.x, e.y, &e.stats);
+                status(w, e.id, e.x, e.y, &entity_stats[&e.id]);
             }
         }))
     }
@@ -1844,6 +1878,7 @@ impl Room {
         let avatar = self.players.get_mut(&player).expect("attached caster");
         avatar.character.x = x;
         avatar.character.y = y;
+        avatar.quiver_ack = None;
         // A warp must not bank idle time or regrant the attach distance credit.
         avatar.move_at = now;
         avatar.teleport_ready = Some(now + std::time::Duration::from_secs(10));
@@ -1992,8 +2027,11 @@ impl Room {
                     "nonfinite shot origin/angle"
                 );
                 r.done()?;
+                let quiver =
+                    self.map.is_some() && i32::from(kind) == self.character(player).stats[&9];
                 ensure!(
-                    owner == player && i32::from(kind) == self.character(player).stats[&8],
+                    owner == player
+                        && (quiver || i32::from(kind) == self.character(player).stats[&8]),
                     "invalid equipped weapon shot: owner={owner} sub={sub} container={kind:#x} expected={:#x}",
                     self.character(player).stats[&8]
                 );
@@ -2008,6 +2046,31 @@ impl Room {
                     "duplicate or excessive bullets"
                 );
                 let weapon = content.get(kind)?;
+                if quiver {
+                    ensure!(
+                        sub == 10
+                            && content.named("Red Arrow")?.id == i16::from(sub)
+                            && angle.abs() <= std::f32::consts::PI,
+                        "invalid native quiver visual/normalized angle"
+                    );
+                    let (w, h) = self.map.as_ref().expect("normal map").dimensions();
+                    ensure!(
+                        x >= 0. && y >= 0. && x < f32::from(w) && y < f32::from(h),
+                        "quiver origin outside map"
+                    );
+                    return self.use_ability(
+                        player,
+                        (1, player),
+                        (x, y),
+                        weapon,
+                        content,
+                        Some(WeaponShot {
+                            id,
+                            origin: (x, y),
+                            angle,
+                        }),
+                    );
+                }
                 let proj = if self.map.is_some() {
                     weapon.normal_projectile(0)?
                 } else {
@@ -2114,6 +2177,7 @@ impl Room {
                     item = a.2,
                     "build100 inventory swap"
                 );
+                self.players.get_mut(&player).expect("attached").quiver_ack = None;
                 out.push(self.tick(content)?);
             }
             19 => {
@@ -2164,6 +2228,7 @@ impl Room {
                     .get_mut(&player)
                     .expect("attached avatar")
                     .character = character;
+                self.players.get_mut(&player).expect("attached").quiver_ack = None;
                 out.push(self.tick(content)?);
                 tracing::info!(
                     world_partition = self.entity_partition(),
@@ -2188,11 +2253,11 @@ impl Room {
                     if item.name != "Health Potion" {
                         out.extend(self.use_ability(
                             player,
-                            slot,
-                            target,
+                            (slot, target),
                             (x, y),
                             item,
                             content,
+                            None,
                         )?);
                         out.push(self.tick(content)?);
                         return Ok(out);
@@ -2339,13 +2404,14 @@ impl Room {
     fn use_ability(
         &mut self,
         player: i32,
-        slot: u8,
-        target: i32,
+        selection: (u8, i32),
         cursor: (f32, f32),
         item: &super::content::Object,
         content: &Content,
+        native: Option<WeaponShot>,
     ) -> Result<Vec<Packet>> {
         use super::content::{Action, Condition};
+        let (slot, target) = selection;
         ensure!(slot == 1, "normal ability requires equipped slot1");
         ensure!(
             target == player,
@@ -2366,6 +2432,39 @@ impl Room {
             "unsupported normal ability semantics: no activations"
         );
         let first_action = item.activations[0].action()?;
+        let quiver = if matches!(first_action, Action::Shoot) {
+            ensure!(
+                character.kind == 0x307,
+                "unsupported normal quiver: requires Archer"
+            );
+            let projectile = item.quiver_projectile()?;
+            let avatar = &self.players[&player];
+            if native.is_none() {
+                ensure!(
+                    avatar.quiver_ack == Some(item.id),
+                    "unsupported normal quiver acknowledgement: no matching paid shot"
+                );
+                self.players.get_mut(&player).expect("attached").quiver_ack = None;
+                return Ok(vec![]);
+            }
+            ensure!(
+                avatar.quiver_ack.is_none(),
+                "outstanding quiver acknowledgement"
+            );
+            ensure!(
+                avatar.weapon.pending.is_none(),
+                "quiver overlaps reserved weapon burst"
+            );
+            let input = native.as_ref().expect("native quiver");
+            ensure!(
+                (1..=96).contains(&input.id),
+                "normal native bullet ID must be in 1..=96"
+            );
+            Some(projectile)
+        } else {
+            ensure!(native.is_none(), "unsupported native ability shot");
+            None
+        };
         let heal = if matches!(item.id, 0xa31..=0xa33)
             || matches!(first_action, Action::HealNova { .. })
         {
@@ -2419,7 +2518,7 @@ impl Room {
                 "normal Nova projectile capacity exceeded"
             );
             Some((projectile, ids, next_cursor))
-        } else if heal.is_some() {
+        } else if heal.is_some() || quiver.is_some() {
             None
         } else {
             for activation in &item.activations {
@@ -2537,10 +2636,38 @@ impl Room {
                 });
             }
         }
+        if let Some(projectile) = quiver {
+            let input = native.as_ref().expect("native quiver");
+            let damage = combat::continuous_damage(
+                combat::DamageSource::Root(item),
+                combat::AttackScaling::Unscaled,
+                rng.gen_range(0.0..1.0),
+            )?;
+            bullets.push(Bullet {
+                flight: Flight::Normal {
+                    projectile: projectile.clone(),
+                    angle: f64::from(input.angle),
+                },
+                owner: player,
+                id: input.id,
+                origin: input.origin,
+                age: 0.,
+                amplitude: projectile.amplitude,
+                frequency: projectile.frequency,
+                x: input.origin.0,
+                y: input.origin.1,
+                vx: input.angle.cos() * projectile.speed,
+                vy: input.angle.sin() * projectile.speed,
+                damage,
+                life: projectile.lifetime,
+            });
+        }
         let mut mask = character.resource_conditions()?;
-        for _ in &item.activations {
-            for effect in &item.effects {
-                mask = conditions.refresh(effect, now)?;
+        if quiver.is_none() {
+            for _ in &item.activations {
+                for effect in &item.effects {
+                    mask = conditions.refresh(effect, now)?;
+                }
             }
         }
         state.conditions = conditions.snapshot();
@@ -2571,6 +2698,9 @@ impl Room {
             out.push(shot(bullet, item.id, angle as f32));
         }
         self.bullets.extend(bullets);
+        if quiver.is_some() {
+            self.players.get_mut(&player).expect("attached").quiver_ack = Some(item.id);
+        }
         if let Some(next) = next_projectile_cursor {
             self.server_projectile_cursors.insert(player, next);
         }
@@ -2883,7 +3013,16 @@ impl Room {
             let from = (e.x, e.y);
             let d = distance(from.0, from.1, goal.0, goal.1);
             if d > stop {
-                let step = (speed * dt).min(d - stop);
+                let factor = if self
+                    .enemy_slows
+                    .get(&id)
+                    .is_some_and(|remaining| *remaining > 0.)
+                {
+                    0.5
+                } else {
+                    1.
+                };
+                let step = (speed * factor * dt).min(d - stop);
                 let to = (
                     from.0 + (goal.0 - from.0) / d * step,
                     from.1 + (goal.1 - from.1) / d * step,
@@ -2962,7 +3101,19 @@ impl Room {
             if let Some(map) = &self.map {
                 if e.kind == 0x801 {
                     let angle = (e.id as f32 + self.elapsed * 0.4).sin() * std::f32::consts::TAU;
-                    let to = (e.x + angle.cos() * dt * 0.4, e.y + angle.sin() * dt * 0.4);
+                    let factor = if self
+                        .enemy_slows
+                        .get(&e.id)
+                        .is_some_and(|remaining| *remaining > 0.)
+                    {
+                        0.5
+                    } else {
+                        1.
+                    };
+                    let to = (
+                        e.x + angle.cos() * dt * 0.4 * factor,
+                        e.y + angle.sin() * dt * 0.4 * factor,
+                    );
                     if chicken_home.is_some_and(|home| distance(to.0, to.1, home.0, home.1) <= 5.)
                         && map.can_move((e.x, e.y), to)
                     {
@@ -3041,6 +3192,11 @@ impl Room {
             }
         }
         self.advance_shore(dt, content, &mut out)?;
+        // Positive-on-entry slows the whole AI step; hits below affect the next advance.
+        self.enemy_slows.retain(|id, remaining| {
+            *remaining = (*remaining - dt).max(0.);
+            *remaining > 0. && self.entities.contains_key(id)
+        });
         let mut hits = vec![];
         for b in &mut self.bullets {
             let from = (b.x, b.y);
@@ -3161,6 +3317,7 @@ impl Room {
                     p.alive = false;
                     p.clear_dead_hp_carry();
                     avatar.weapon.pending = None;
+                    avatar.quiver_ack = None;
                     tracing::info!(
                         avatar = target,
                         generation = p.generation,
@@ -3174,8 +3331,28 @@ impl Room {
                     flight.damage(raw, *e.stats.get(&21).context("enemy Defense missing")?)?;
                 let hp = e.stats.get_mut(&1).context("enemy HP missing")?;
                 *hp = hp.checked_sub(damage).context("enemy damage HP overflow")?;
-                out.push(damage_packet(target, owner, id, damage));
+                let slow = match &flight {
+                    Flight::Normal { projectile, .. } => projectile
+                        .effects
+                        .iter()
+                        .find(|effect| effect.condition == super::content::Condition::Slowed),
+                    Flight::Arena => None,
+                };
+                if let Some(effect) = slow {
+                    self.enemy_slows.insert(target, effect.duration_seconds);
+                    out.push(packet(9, |w| {
+                        w.i32(target)
+                            .u8(super::content::Condition::Slowed as u8)
+                            .u8(effect.duration_seconds as u8)
+                            .i16(damage as i16)
+                            .u8(id)
+                            .i32(owner);
+                    }));
+                } else {
+                    out.push(damage_packet(target, owner, id, damage));
+                }
                 if e.stats[&1] <= 0 {
+                    self.enemy_slows.remove(&target);
                     let e = self.entities.remove(&target).expect("enemy present");
                     out.push(drop_object(target));
                     if self.map.is_some() {
@@ -3256,6 +3433,8 @@ impl Room {
             self.teaching_objects(content)?;
             self.hazards(&mut out)?;
         }
+        self.enemy_slows
+            .retain(|id, _| self.entities.contains_key(id));
         self.replenish_shore(content)?;
         self.server_projectile_cursors.retain(|owner, _| {
             self.players.get(owner).is_some_and(|a| a.character.alive)
@@ -3729,3 +3908,7 @@ mod healnova_runtime_tests;
 #[cfg(test)]
 #[path = "prediction_runtime_tests.rs"]
 pub(crate) mod prediction_runtime_tests;
+
+#[cfg(test)]
+#[path = "quiver_runtime_tests.rs"]
+pub(crate) mod quiver_runtime_tests;

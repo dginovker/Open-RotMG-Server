@@ -573,7 +573,7 @@ impl Simulation {
             return Ok(());
         }
         let world = s.world;
-        if packet.id == 15 {
+        if matches!(packet.id, 8 | 15) {
             let room = self.worlds.get(&world).context("selected world missing")?;
             if room.map.is_some() {
                 ensure!(s.avatar.is_some(), "character selection required");

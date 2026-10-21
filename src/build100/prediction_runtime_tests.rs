@@ -62,6 +62,7 @@ fn prediction_runtime_known_living_enemy_self_only_drop_then_make() {
 }
 
 pub(crate) fn authority_unchanged(before: &Room, after: &Room) {
+    assert_eq!(before.enemy_slows, after.enemy_slows);
     assert_eq!(
         shore_runtime_tests::snapshot(before),
         shore_runtime_tests::snapshot(after)
@@ -159,6 +160,7 @@ fn prediction_runtime_current_full_status_not_saved_prediction_or_stat25() {
     e.stats.extend([(1, 3), (29, 1 << 3)]);
     assert!(!e.stats.contains_key(&25));
     let expected = make(enemy, e.kind, "", e.x, e.y, &e.stats);
+    r.enemy_slows.insert(enemy, 3.);
     let before = r.clone();
     let out = r.publication(1, &[], &c).unwrap();
     assert_eq!(target_packets(&out, enemy), vec![11, 10]);

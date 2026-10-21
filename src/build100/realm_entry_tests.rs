@@ -2390,3 +2390,6 @@ async fn inventory_drop_actor_full_or_closed_output_cannot_undo_commit_or_replay
 
 #[path = "healnova_actor_tests.rs"]
 mod healnova_actor_tests;
+
+#[path = "quiver_actor_tests.rs"]
+mod quiver_actor_tests;
