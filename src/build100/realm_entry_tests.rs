@@ -2384,3 +2384,6 @@ async fn inventory_drop_actor_full_or_closed_output_cannot_undo_commit_or_replay
         h.stop().await;
     }
 }
+
+#[path = "healnova_actor_tests.rs"]
+mod healnova_actor_tests;

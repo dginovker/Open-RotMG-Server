@@ -510,6 +510,40 @@ impl Simulation {
         tx.commit().context("commit build100 world mutation")?;
         Ok(())
     }
+    fn validate_room_owners(&self, world: i32) -> Result<()> {
+        let room = self.worlds.get(&world).context("selected world missing")?;
+        for (&avatar, attached) in &room.players {
+            let mut bindings = self
+                .sessions
+                .iter()
+                .filter(|(_, s)| s.avatar == Some(avatar));
+            let (id, owner) = bindings
+                .next()
+                .context("Room avatar lacks current session")?;
+            ensure!(
+                bindings.next().is_none()
+                    && owner.world == world
+                    && owner.generation == Some(attached.character.generation)
+                    && self.owners.get(&owner.guid) == Some(id)
+                    && self
+                        .owners
+                        .values()
+                        .filter(|owner_id| *owner_id == id)
+                        .count()
+                        == 1,
+                "Room avatar current ownership invariant failed: avatar {avatar}"
+            );
+        }
+        for owner in self.sessions.values().filter(|s| s.world == world) {
+            if let Some(avatar) = owner.avatar {
+                ensure!(
+                    room.players.contains_key(&avatar),
+                    "orphan selected Room binding"
+                );
+            }
+        }
+        Ok(())
+    }
     fn input(&mut self, session: u64, packet: Packet, received: Instant) -> Result<()> {
         self.input_at(session, packet, received, Instant::now())
     }
@@ -539,6 +573,13 @@ impl Simulation {
             return Ok(());
         }
         let world = s.world;
+        if packet.id == 15 {
+            let room = self.worlds.get(&world).context("selected world missing")?;
+            if room.map.is_some() {
+                ensure!(s.avatar.is_some(), "character selection required");
+                self.validate_room_owners(world)?;
+            }
+        }
         let teleport_target = if packet.id == 28 {
             let avatar = s.avatar.context("character selection required")?;
             let attached = self.worlds[&world]
@@ -981,11 +1022,14 @@ impl Simulation {
             .as_ref()
             .err()
             .is_some_and(|e| e.is::<StorageFailure>());
-        let waiting = self
-            .sessions
-            .get(&session)
-            .and_then(|s| Some((s.world, s.avatar?, s.generation?)))
-            .filter(|(world, avatar, _)| self.worlds[world].weapon_deadline(*avatar).is_some());
+        let waiting = if result.is_ok() {
+            self.sessions
+                .get(&session)
+                .and_then(|s| Some((s.world, s.avatar?, s.generation?)))
+                .filter(|(world, avatar, _)| self.worlds[world].weapon_deadline(*avatar).is_some())
+        } else {
+            None
+        };
         if let (Ok(()), Some((world, avatar, generation))) = (&result, waiting) {
             ensure!(
                 !self.deferred_weapons.contains_key(&session),

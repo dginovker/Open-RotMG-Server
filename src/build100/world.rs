@@ -740,6 +740,10 @@ fn drop_object(id: i32) -> Packet {
         w.i32(id);
     })
 }
+fn healnova_recipient(alive: bool, conditions: combat::ConditionMask) -> bool {
+    alive && !conditions.contains(super::content::Condition::Paused)
+}
+
 fn distance(x: f32, y: f32, xx: f32, yy: f32) -> f32 {
     (x - xx).hypot(y - yy)
 }
@@ -2313,7 +2317,25 @@ impl Room {
             !item.activations.is_empty(),
             "unsupported normal ability semantics: no activations"
         );
-        let nova = if matches!(item.activations[0].action()?, Action::BulletNova) {
+        let first_action = item.activations[0].action()?;
+        let heal = if matches!(item.id, 0xa31..=0xa33)
+            || matches!(first_action, Action::HealNova { .. })
+        {
+            ensure!(
+                character.kind == 0x310
+                    && matches!(item.id, 0xa31..=0xa33)
+                    && item.activations.len() == 1
+                    && item.effects.is_empty(),
+                "unsupported normal HealNova: requires ordinary Priest spell, one activation and no root effects"
+            );
+            let Action::HealNova { range, healing } = first_action else {
+                bail!("unsupported normal Priest spell action: requires HealNova");
+            };
+            Some((range, healing))
+        } else {
+            None
+        };
+        let nova = if matches!(first_action, Action::BulletNova) {
             ensure!(
                 character.kind == 0x30e && item.activations.len() == 1 && item.effects.is_empty(),
                 "unsupported normal Wizard BulletNova: requires one activation and no root effects"
@@ -2349,6 +2371,8 @@ impl Room {
                 "normal Nova projectile capacity exceeded"
             );
             Some((projectile, ids, next_cursor))
+        } else if heal.is_some() {
+            None
         } else {
             for activation in &item.activations {
                 ensure!(
@@ -2390,6 +2414,49 @@ impl Room {
             )?,
             "normal ability insufficient MP or cooldown not ready"
         );
+        let mut healed = BTreeMap::new();
+        let mut hp_delta = 0_i64;
+        if let Some((range, amount)) = heal {
+            let map = self.map.as_ref().context("normal heal map missing")?;
+            let (width, height) = map.dimensions();
+            for (&id, avatar) in &self.players {
+                let peer = &avatar.character;
+                ensure!(
+                    peer.x.is_finite()
+                        && peer.y.is_finite()
+                        && peer.x >= 0.
+                        && peer.y >= 0.
+                        && peer.x < f32::from(width)
+                        && peer.y < f32::from(height),
+                    "normal heal authoritative position outside map: avatar {id}"
+                );
+                if peer.alive {
+                    self.wire_stats(peer, content)?;
+                }
+            }
+            for (&id, avatar) in &self.players {
+                let mut peer = avatar.character.clone();
+                if !peer.alive || distance(character.x, character.y, peer.x, peer.y) >= range {
+                    continue;
+                }
+                let stats = peer.equipment_stats(content)?;
+                let before = peer.vitals(&stats)?;
+                let mask = peer.resource_conditions()?;
+                if !healnova_recipient(peer.alive, mask) {
+                    continue;
+                }
+                let after = before.heal(amount, &stats, mask)?;
+                hp_delta += i64::from(after.hp - before.hp);
+                peer.store_vitals(after);
+                peer.vitals(&stats)?;
+                healed.insert(id, peer);
+            }
+            // Merge the caster's heal before payment so its recipient copy cannot refund MP.
+            if let Some(caster) = healed.get(&player) {
+                character = caster.clone();
+                vitals = character.vitals(&effective)?;
+            }
+        }
         let mut rng = self.rng.clone();
         let mut bullets = vec![];
         let mut next_projectile_cursor = None;
@@ -2436,10 +2503,17 @@ impl Room {
         character.stats.insert(25, mask.bits() as i32);
         character.action_state = Some(state);
         character.vitals(&effective)?;
-        self.players
-            .get_mut(&player)
-            .expect("attached avatar")
-            .character = character;
+        if heal.is_some() {
+            self.wire_stats(&character, content)?;
+        }
+        let selected = healed.len();
+        healed.insert(player, character);
+        for (id, character) in healed {
+            self.players
+                .get_mut(&id)
+                .expect("staged attached avatar")
+                .character = character;
+        }
         self.rng = rng;
         let mut out = vec![];
         for bullet in &bullets {
@@ -2456,6 +2530,9 @@ impl Room {
             avatar = player,
             item = item.id,
             mp = vitals.mp,
+            payment = item.mp_cost,
+            selected,
+            hp_delta,
             mask = mask.bits(),
             "build100 paid normal ability pending commit"
         );
@@ -3596,3 +3673,7 @@ pub(crate) mod spell_runtime_tests;
 #[cfg(test)]
 #[path = "shore_runtime_tests.rs"]
 pub(crate) mod shore_runtime_tests;
+
+#[cfg(test)]
+#[path = "healnova_runtime_tests.rs"]
+mod healnova_runtime_tests;
