@@ -542,10 +542,36 @@ struct WeaponAdmission {
     interval_ms: f64,
     pending: Option<PendingWeaponBurst>,
 }
+#[derive(Debug)]
+pub(crate) enum TeleportDecline {
+    Dead,
+    TargetUnavailable,
+    Paused,
+    Cooldown,
+}
+impl std::fmt::Display for TeleportDecline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Dead => "dead avatar cannot teleport",
+            Self::TargetUnavailable => "teleport target is not a living owned player in this room",
+            Self::Paused => "paused player cannot teleport or be a teleport target",
+            Self::Cooldown => "teleport cooldown has not expired",
+        })
+    }
+}
+impl std::error::Error for TeleportDecline {}
+fn teleport_unpaused(mask: combat::ConditionMask) -> Result<()> {
+    if mask.contains(super::content::Condition::Paused) {
+        return Err(TeleportDecline::Paused.into());
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct Avatar {
     pub character: Character,
     move_at: Instant,
+    teleport_ready: Option<Instant>,
     weapon: WeaponAdmission,
     hazard_at: f32,
     move_credit: f32,
@@ -976,6 +1002,13 @@ impl Room {
                         || (avatar.known_objects.contains(&owner)
                             && removed_owners.contains(&owner))
                 }
+                18 => {
+                    let owner = r.i32()?;
+                    r.f32()?;
+                    r.f32()?;
+                    r.done()?;
+                    visible.contains_key(&owner)
+                }
                 9 => {
                     let target = r.i32()?;
                     r.u8()?;
@@ -1255,6 +1288,7 @@ impl Room {
             Avatar {
                 character,
                 move_at: Instant::now(),
+                teleport_ready: None,
                 weapon: WeaponAdmission::default(),
                 hazard_at: self.elapsed,
                 move_credit: MOVE_DISTANCE_CREDIT,
@@ -1721,6 +1755,66 @@ impl Room {
         self.players.get_mut(&player).expect("attached").weapon = admission;
         Ok(output)
     }
+    fn teleport(
+        &mut self,
+        player: i32,
+        target: i32,
+        content: &Content,
+        now: Instant,
+    ) -> Result<Vec<Packet>> {
+        let caster = self.character(player);
+        if self.map.is_some() {
+            caster.vitals(&caster.equipment_stats(content)?)?;
+        }
+        if !caster.alive {
+            return Err(TeleportDecline::Dead.into());
+        }
+        teleport_unpaused(combat::ConditionMask::from_bits(caster.stats[&25] as u32)?)?;
+        if self.players[&player]
+            .teleport_ready
+            .is_some_and(|ready| now < ready)
+        {
+            return Err(TeleportDecline::Cooldown.into());
+        }
+        let Some(target) = self.players.get(&target).filter(|a| a.character.alive) else {
+            return Err(TeleportDecline::TargetUnavailable.into());
+        };
+        let target = &target.character;
+        if self.map.is_some() {
+            target.vitals(&target.equipment_stats(content)?)?;
+        }
+        teleport_unpaused(combat::ConditionMask::from_bits(target.stats[&25] as u32)?)?;
+        let (x, y) = (target.x, target.y);
+        ensure!(
+            x.is_finite() && y.is_finite(),
+            "nonfinite authoritative teleport destination"
+        );
+        if let Some(map) = &self.map {
+            let (w, h) = map.dimensions();
+            ensure!(
+                x >= 0.
+                    && y >= 0.
+                    && x < f32::from(w)
+                    && y < f32::from(h)
+                    && map.walkable(x.floor() as i32, y.floor() as i32),
+                "illegal authoritative teleport destination"
+            );
+        } else {
+            ensure!(
+                (2.0..30.0).contains(&x) && (2.0..30.0).contains(&y),
+                "teleport destination outside arena"
+            );
+        }
+        let avatar = self.players.get_mut(&player).expect("attached caster");
+        avatar.character.x = x;
+        avatar.character.y = y;
+        // A warp must not bank idle time or regrant the attach distance credit.
+        avatar.move_at = now;
+        avatar.teleport_ready = Some(now + std::time::Duration::from_secs(10));
+        Ok(vec![packet(18, |w| {
+            w.i32(player).f32(x).f32(y);
+        })])
+    }
     #[cfg(test)]
     pub fn handle(&mut self, player: i32, p: Packet, content: &Content) -> Result<Vec<Packet>> {
         let now = Instant::now();
@@ -1735,6 +1829,9 @@ impl Room {
         now: Instant,
     ) -> Result<Vec<Packet>> {
         ensure!(self.players.contains_key(&player), "avatar not attached");
+        if p.id == 28 {
+            return self.teleport(player, super::protocol::teleport(&p.body)?, content, now);
+        }
         if !self.character(player).alive {
             tracing::debug!(
                 id = p.id,
@@ -3459,6 +3556,10 @@ pub(crate) mod tests {
         assert_eq!(r.character(PLAYER).stats[&5], 150);
     }
 }
+
+#[cfg(test)]
+#[path = "teleport_runtime_tests.rs"]
+pub(crate) mod teleport_runtime_tests;
 
 #[cfg(test)]
 #[path = "realm_entry_world_tests.rs"]

@@ -1,6 +1,9 @@
 use super::*;
 use crate::content::Grounds;
 
+#[path = "teleport_actor_tests.rs"]
+mod teleport_actor_tests;
+
 impl Harness {
     fn normal() -> Self {
         Self::normal_with_db(Arc::new(Mutex::new(

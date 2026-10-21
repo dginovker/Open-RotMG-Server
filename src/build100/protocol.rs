@@ -56,6 +56,13 @@ impl Selection {
     }
 }
 
+pub fn teleport(body: &[u8]) -> Result<i32> {
+    let mut r = Reader::new(body);
+    let target = r.i32()?;
+    r.done()?;
+    Ok(target)
+}
+
 pub fn pong(body: &[u8]) -> Result<i32> {
     let mut r = Reader::new(body);
     let serial = r.i32()?;
