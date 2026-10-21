@@ -327,6 +327,9 @@ fn cloak_runtime_whole_semantics_prevalidate_compounds_unknown_effects_and_metad
         let mut candidate = r.clone();
         candidate.detach(1);
         let mut p = Character::new(&c, kind, "Unsupported".into(), 1).unwrap();
+        if kind == 0x310 {
+            p.stats.insert(9, 0xa5b);
+        }
         (p.x, p.y) = candidate.landing();
         candidate.attach(1, p, &c).unwrap();
         let mut unsupported = Content {
