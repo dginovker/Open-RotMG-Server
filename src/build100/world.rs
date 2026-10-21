@@ -1967,6 +1967,64 @@ impl Room {
                 );
                 out.push(self.tick(content)?);
             }
+            19 => {
+                let owner = r.i32()?;
+                let slot = r.u8()?;
+                let kind = r.i16()?;
+                r.done()?;
+                ensure!(owner == player, "cannot drop another object's item");
+                ensure!(
+                    kind >= 0 && self.item(player, owner, slot)? == i32::from(kind),
+                    "empty or stale inventory drop"
+                );
+                self.can_store(player, owner, slot, kind, content)?;
+                let bag_def = content.named("Loot Bag")?;
+                ensure!(
+                    bag_def.id == 0x500
+                        && bag_def.class == "Container"
+                        && bag_def.slots == vec![0; 8],
+                    "inventory drop requires canonical eight-slot Loot Bag"
+                );
+                let mut character = self.character(player).clone();
+                if self.map.is_some() {
+                    let old = character.equipment_stats(content)?;
+                    let vitals = character.vitals(&old)?;
+                    character.stats.insert(8 + slot, -1);
+                    let effective = character.equipment_stats(content)?;
+                    character.store_vitals(vitals.rebase(&old, &effective)?);
+                } else {
+                    character.stats.insert(8 + slot, -1);
+                }
+                let id = self.allocate_entity()?;
+                let mut stats = bag_def.stats.clone();
+                for bag_slot in 8..16 {
+                    stats.insert(bag_slot, if bag_slot == 8 { i32::from(kind) } else { -1 });
+                }
+                let bag = Entity {
+                    id,
+                    kind: bag_def.id,
+                    x: character.x,
+                    y: character.y,
+                    stats,
+                    age: 0.,
+                    provenance: Provenance::Loot { source: player },
+                };
+                out.push(make(id, bag.kind, "", bag.x, bag.y, &bag.stats));
+                self.entities.insert(id, bag);
+                self.players
+                    .get_mut(&player)
+                    .expect("attached avatar")
+                    .character = character;
+                out.push(self.tick(content)?);
+                tracing::info!(
+                    world_partition = self.entity_partition(),
+                    avatar = player,
+                    slot,
+                    item = kind,
+                    bag = id,
+                    "build100 inventory drop pending owner commit"
+                );
+            }
             15 => {
                 let owner = r.i32()?;
                 let slot = r.u8()?;
@@ -3405,6 +3463,10 @@ pub(crate) mod tests {
 #[cfg(test)]
 #[path = "realm_entry_world_tests.rs"]
 mod realm_entry_tests;
+
+#[cfg(test)]
+#[path = "inventory_drop_tests.rs"]
+mod inventory_drop_tests;
 
 #[cfg(test)]
 #[path = "equipment_runtime_tests.rs"]
