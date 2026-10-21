@@ -180,8 +180,17 @@ impl Simulation {
         true
     }
     fn broadcast(&mut self, world: i32, except: Option<u64>, packets: Vec<Packet>) -> Result<()> {
-        let mut pending = VecDeque::from([(world, except, packets)]);
-        while let Some((world, except, packets)) = pending.pop_front() {
+        self.broadcast_input(world, except, packets, None)
+    }
+    fn broadcast_input(
+        &mut self,
+        world: i32,
+        except: Option<u64>,
+        packets: Vec<Packet>,
+        teleport_requester: Option<u64>,
+    ) -> Result<()> {
+        let mut pending = VecDeque::from([(world, except, packets, teleport_requester)]);
+        while let Some((world, except, packets, teleport_requester)) = pending.pop_front() {
             let recipients: Vec<_> = self
                 .sessions
                 .iter()
@@ -190,7 +199,7 @@ impl Simulation {
                 .collect();
             let mut batches = vec![];
             for id in recipients {
-                let output = if self.entry.is_some() {
+                let mut output = if self.entry.is_some() {
                     let avatar = self.sessions[&id].avatar.expect("loaded viewer");
                     self.worlds
                         .get_mut(&world)
@@ -205,6 +214,12 @@ impl Simulation {
                         })
                         .collect()
                 };
+                if teleport_requester == Some(id) {
+                    output.push(Packet {
+                        id: 29,
+                        body: vec![],
+                    });
+                }
                 batches.push((id, output));
             }
             let mut failed = vec![];
@@ -216,7 +231,7 @@ impl Simulation {
             // Finish each fan-out before publishing removals, so an arrival cannot follow its Drop.
             for id in failed {
                 if let Some((world, out)) = self.remove_session(id, false) {
-                    pending.push_back((world, None, out));
+                    pending.push_back((world, None, out, None));
                 }
             }
         }
@@ -524,6 +539,20 @@ impl Simulation {
             return Ok(());
         }
         let world = s.world;
+        let teleport_target = if packet.id == 28 {
+            let avatar = s.avatar.context("character selection required")?;
+            let attached = self.worlds[&world]
+                .players
+                .get(&avatar)
+                .context("selected avatar missing")?;
+            ensure!(
+                s.generation == Some(attached.character.generation),
+                "selected generation no longer attached"
+            );
+            Some(protocol::teleport(&packet.body)?)
+        } else {
+            None
+        };
         let player_move = packet.id == 5;
         let _move_trace = player_move.then(|| {
             tracing::debug_span!(
@@ -613,20 +642,58 @@ impl Simulation {
             s.avatar = Some(id);
             s.generation = Some(generation);
         } else {
-            let result = candidate.handle_at(
-                s.avatar.context("character selection required")?,
-                packet,
-                &self.content,
-                received,
-                now,
-            );
+            let result = candidate
+                .handle_at(
+                    s.avatar.context("character selection required")?,
+                    packet,
+                    &self.content,
+                    received,
+                    now,
+                )
+                .and_then(|output| {
+                    if let Some(target) = teleport_target {
+                        let generation = candidate
+                            .players
+                            .get(&target)
+                            .context("accepted teleport target missing")?
+                            .character
+                            .generation;
+                        let owned = self.sessions.iter().any(|(id, owner)| {
+                            owner.world == world
+                                && owner.avatar == Some(target)
+                                && owner.generation == Some(generation)
+                                && self.owners.get(&owner.guid) == Some(id)
+                        });
+                        if !owned {
+                            return Err(crate::world::TeleportDecline::TargetUnavailable.into());
+                        }
+                    }
+                    Ok(output)
+                });
             if player_shot {
                 tracing::debug!(elapsed_ms=candidate_started.elapsed().as_secs_f64()*1000.0,success=result.is_ok(),output_count=result.as_ref().ok().map(Vec::len),error=?result.as_ref().err(),"build100 weapon candidate end");
             }
             if player_move {
                 tracing::debug!(target: "build100_move", candidate_ended=?Instant::now(), accepted=result.is_ok(), error=?result.as_ref().err(), "MOVE candidate end; not committed or installed");
             }
-            output = result?;
+            output = match result {
+                Ok(output) => output,
+                Err(error) => {
+                    if teleport_target.is_some()
+                        && error.is::<crate::world::TeleportDecline>()
+                        && !self.emit(
+                            session,
+                            vec![Packet {
+                                id: 29,
+                                body: vec![],
+                            }],
+                        )
+                    {
+                        self.detach(session, false)?;
+                    }
+                    return Err(error);
+                }
+            };
         }
         let commit_started = Instant::now();
         if player_shot {
@@ -691,7 +758,12 @@ impl Simulation {
                     "build100 weapon publication begin; committed candidate installed"
                 );
             }
-            let published = self.broadcast(world, player_shot.then_some(session), output);
+            let published = self.broadcast_input(
+                world,
+                player_shot.then_some(session),
+                output,
+                teleport_target.map(|_| session),
+            );
             if player_shot {
                 tracing::debug!(
                     elapsed_ms = publication_started.elapsed().as_secs_f64() * 1000.0,
