@@ -1858,3 +1858,526 @@ async fn weapon_runtime_actor_delayed_owner_uses_ingress_marks_and_same_frame_pa
     assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
     h.stop().await;
 }
+
+fn inventory_drop_packet(avatar: i32, slot: u8, item: i16) -> Packet {
+    packet(19, |w| {
+        w.i32(avatar).u8(slot).i16(item);
+    })
+}
+
+#[tokio::test]
+async fn inventory_drop_actor_invalid_and_queued_duplicate_never_publish_or_multiply() {
+    let h = Harness::normal();
+    let (mut a, _) = h.enter_route(A, 0).await;
+    let (mut b, _) = h.enter_route(B, 0).await;
+    drain(&mut a);
+    drain(&mut b);
+    let before = character(&h.db, A).unwrap().unwrap();
+    let peer = character(&h.db, B).unwrap().unwrap();
+    let state = h
+        .inspect(|s| crate::world::progression_runtime_tests::reward_state(&s.worlds[&0]))
+        .await;
+    for p in [
+        Packet {
+            id: 19,
+            body: vec![0; 6],
+        },
+        Packet {
+            id: 19,
+            body: vec![0; 8],
+        },
+        inventory_drop_packet(b.avatar, 4, 0xa22),
+        inventory_drop_packet(a.avatar, 255, 0xa22),
+        inventory_drop_packet(a.avatar, 4, 0xa23),
+        inventory_drop_packet(a.avatar, 5, -1),
+    ] {
+        assert!(h.input(a.session, p).await.is_err());
+        assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
+        assert_eq!(character(&h.db, A).unwrap().unwrap(), before);
+        assert_eq!(character(&h.db, B).unwrap().unwrap(), peer);
+        assert_eq!(
+            h.inspect(|s| crate::world::progression_runtime_tests::reward_state(&s.worlds[&0]))
+                .await,
+            state
+        );
+    }
+    let mut replies = vec![];
+    for _ in 0..2 {
+        let (reply, result) = oneshot::channel();
+        h.commands
+            .send(Command::Input {
+                received: Instant::now(),
+                session: a.session,
+                packet: inventory_drop_packet(a.avatar, 4, 0xa22),
+                reply,
+            })
+            .await
+            .unwrap();
+        replies.push(result);
+    }
+    replies.remove(0).await.unwrap().unwrap();
+    assert!(
+        replies
+            .remove(0)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("stale inventory drop")
+    );
+    let pa = drain(&mut a);
+    let pb = drain(&mut b);
+    assert_eq!(objects(&pa, 0x500).len(), 1);
+    assert_eq!(objects(&pa, 0x500), objects(&pb, 0x500));
+    let mut expected = before;
+    expected.stats.insert(12, -1);
+    assert_eq!(character(&h.db, A).unwrap().unwrap(), expected);
+    assert_eq!(character(&h.db, B).unwrap().unwrap(), peer);
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn inventory_drop_actor_sql_failure_keeps_candidate_room_rng_ids_and_wire_then_retry() {
+    let h = Harness::normal();
+    let (mut a, _) = h.enter_route(A, 0).await;
+    let (mut b, _) = h.enter_route(B, 0).await;
+    drain(&mut a);
+    drain(&mut b);
+    let before = character(&h.db, A).unwrap().unwrap();
+    let peer = character(&h.db, B).unwrap().unwrap();
+    h.db.lock().unwrap().execute_batch("CREATE TRIGGER fail_drop BEFORE UPDATE ON build100_characters BEGIN SELECT RAISE(ABORT,'drop commit failure'); END;").unwrap();
+    let error = h
+        .inspect(move |s| {
+            use crate::world::progression_runtime_tests::{bags, reward_state};
+            let state = reward_state(&s.worlds[&0]);
+            let loot = bags(&s.worlds[&0]);
+            let owner = s.worlds[&0].character(a.avatar).clone();
+            let peer = s.worlds[&0].character(b.avatar).clone();
+            let error = s
+                .input(
+                    a.session,
+                    inventory_drop_packet(a.avatar, 4, 0xa22),
+                    Instant::now(),
+                )
+                .unwrap_err();
+            assert_eq!(reward_state(&s.worlds[&0]), state);
+            assert_eq!(bags(&s.worlds[&0]), loot);
+            assert_eq!(s.worlds[&0].character(a.avatar), &owner);
+            assert_eq!(s.worlds[&0].character(b.avatar), &peer);
+            format!("{error:#}")
+        })
+        .await;
+    assert!(error.contains("drop commit failure"));
+    assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
+    assert_eq!(character(&h.db, A).unwrap().unwrap(), before);
+    assert_eq!(character(&h.db, B).unwrap().unwrap(), peer);
+    h.db.lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_drop;")
+        .unwrap();
+    h.input(a.session, inventory_drop_packet(a.avatar, 4, 0xa22))
+        .await
+        .unwrap();
+    let pa = drain(&mut a);
+    assert_eq!(objects(&pa, 0x500).len(), 1);
+    assert_eq!(objects(&pa, 0x500), objects(&drain(&mut b), 0x500));
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn inventory_drop_actor_fatal_sql_failure_no_equipment_clamp_or_success_on_either_peer() {
+    let h = Harness::normal();
+    let (mut a, _) = h.enter_route(A, 0).await;
+    let (mut b, _) = h.enter_route(B, 0).await;
+    h.inspect(move |s| {
+        let mut room = s.worlds[&0].clone();
+        room.character_mut(a.avatar)
+            .stats
+            .extend([(11, 0xa27), (1, 140)]);
+        s.commit(&room, &s.worlds[&0]).unwrap();
+        s.worlds.insert(0, room);
+    })
+    .await;
+    drain(&mut a);
+    drain(&mut b);
+    let before = character(&h.db, A).unwrap().unwrap();
+    let peer = character(&h.db, B).unwrap().unwrap();
+    h.db.lock().unwrap().execute_batch("CREATE TRIGGER fail_drop BEFORE UPDATE ON build100_characters BEGIN SELECT RAISE(ABORT,'fatal drop failure'); END;").unwrap();
+    assert!(
+        h.input(a.session, inventory_drop_packet(a.avatar, 3, 0xa27))
+            .await
+            .unwrap_err()
+            .contains("fatal drop failure")
+    );
+    assert!(h.task.await.unwrap().is_err());
+    assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
+    assert!(a.output.is_closed() && b.output.is_closed());
+    assert_eq!(character(&h.db, A).unwrap().unwrap(), before);
+    assert_eq!(character(&h.db, B).unwrap().unwrap(), peer);
+    h.db.lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_drop;")
+        .unwrap();
+    let h = Harness::normal_with_db(h.db);
+    let mut a = h.join(A, 0).await.unwrap();
+    let out = h.load(&mut a).await;
+    let stats = equipment_wire(&out, 10, a.avatar);
+    assert_eq!((stats[&0], stats[&1], stats[&11]), (140, 140, 0xa27));
+    assert!(objects(&out, 0x500).is_empty());
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn inventory_drop_actor_peer_equipment_projection_pickup_reload_and_disk_restart() {
+    let path = std::env::temp_dir().join(format!("build100-drop-{}.sqlite", rand::random::<u64>()));
+    let db = Arc::new(Mutex::new(database(&path).unwrap()));
+    let h = Harness::normal_with_db(db.clone());
+    let (mut a, _) = h.enter_route(A, 0).await;
+    let (mut b, _) = h.enter_route(B, 0).await;
+    h.inspect(move |s| {
+        let mut room = s.worlds[&0].clone();
+        crate::world::shore_runtime_tests::isolate_population(&mut room);
+        room.character_mut(a.avatar)
+            .stats
+            .extend([(11, 0xa27), (10, 0xa5f), (1, 140), (4, 135)]);
+        s.commit(&room, &s.worlds[&0]).unwrap();
+        s.worlds.insert(0, room);
+    })
+    .await;
+    drain(&mut a);
+    drain(&mut b);
+    h.input(a.session, inventory_drop_packet(a.avatar, 3, 0xa27))
+        .await
+        .unwrap();
+    let ring = objects(&drain(&mut a), 0x500)[0];
+    let peer_out = drain(&mut b);
+    assert_eq!(objects(&peer_out, 0x500), [ring]);
+    let stats = equipment_wire(&peer_out, 13, a.avatar);
+    assert_eq!(
+        (
+            stats[&0], stats[&1], stats[&3], stats[&4], stats[&20], stats[&21]
+        ),
+        (100, 100, 140, 135, 17, 4)
+    );
+    h.input(a.session, inventory_drop_packet(a.avatar, 2, 0xa5f))
+        .await
+        .unwrap();
+    let out = drain(&mut a);
+    let robe = objects(&out, 0x500)[0];
+    let stats = equipment_wire(&out, 13, a.avatar);
+    assert_eq!(
+        (
+            stats[&0], stats[&1], stats[&3], stats[&4], stats[&20], stats[&21]
+        ),
+        (100, 100, 100, 100, 12, 0)
+    );
+    assert_eq!(equipment_wire(&drain(&mut b), 13, a.avatar), stats);
+    h.detach(a.session).await;
+    let mut a = h.join(A, 0).await.unwrap();
+    let out = h.load(&mut a).await;
+    assert_eq!(equipment_wire(&out, 10, a.avatar)[&11], -1);
+    assert!(objects(&out, 0x500).contains(&ring));
+    drain(&mut b);
+    // Other worlds cannot resolve even a valid, currently occupied bag ID.
+    let (mut other, _) = h
+        .enter_route("cccccccccccccccccccccccccccccccccccccccc", -1)
+        .await;
+    assert!(
+        h.input(
+            other.session,
+            equipment_swap((ring, 0, 0xa27), (other.avatar, 5, -1))
+        )
+        .await
+        .is_err()
+    );
+    assert!(drain(&mut other).is_empty());
+    // Queue both real owner commands: one pickup commits, the stale loser gains nothing.
+    let mut results = vec![];
+    for (session, avatar) in [(b.session, b.avatar), (a.session, a.avatar)] {
+        let (reply, result) = oneshot::channel();
+        h.commands
+            .send(Command::Input {
+                received: Instant::now(),
+                session,
+                packet: equipment_swap((ring, 0, 0xa27), (avatar, 5, -1)),
+                reply,
+            })
+            .await
+            .unwrap();
+        results.push(result);
+    }
+    results.remove(0).await.unwrap().unwrap();
+    assert!(
+        results
+            .remove(0)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("stale inventory")
+    );
+    h.input(
+        b.session,
+        equipment_swap((robe, 0, 0xa5f), (b.avatar, 6, -1)),
+    )
+    .await
+    .unwrap();
+    h.input(
+        b.session,
+        equipment_swap((b.avatar, 5, 0xa27), (b.avatar, 3, -1)),
+    )
+    .await
+    .unwrap();
+    h.input(
+        b.session,
+        equipment_swap((b.avatar, 6, 0xa5f), (b.avatar, 2, -1)),
+    )
+    .await
+    .unwrap();
+    let peer_stats = equipment_wire(&drain(&mut b), 13, b.avatar);
+    // The first pickup Tick precedes re-equipping; inspect the final authoritative arrival instead.
+    assert_eq!(peer_stats[&1], 100);
+    let out = h
+        .inspect(move |s| s.worlds[&0].arrival(b.avatar, &s.content).unwrap())
+        .await;
+    let projected = equipment_wire(&[out], 10, b.avatar);
+    assert_eq!(
+        (
+            projected[&0],
+            projected[&1],
+            projected[&3],
+            projected[&4],
+            projected[&20],
+            projected[&21]
+        ),
+        (140, 100, 140, 100, 17, 4)
+    );
+    h.tick(0.).await.unwrap();
+    assert!(
+        h.inspect(|s| crate::world::progression_runtime_tests::bags(&s.worlds[&0]))
+            .await
+            .is_empty()
+    );
+    let owner = character(&db, A).unwrap().unwrap();
+    let peer = character(&db, B).unwrap().unwrap();
+    assert_eq!(
+        (
+            owner.stats[&11],
+            owner.stats[&10],
+            owner.stats[&0],
+            owner.stats[&3]
+        ),
+        (-1, -1, 100, 100)
+    );
+    assert_eq!(
+        (
+            peer.stats[&11],
+            peer.stats[&10],
+            peer.generation,
+            peer.alive
+        ),
+        (0xa27, 0xa5f, 1, true)
+    );
+    h.stop().await;
+    drop(db);
+    let db = Arc::new(Mutex::new(database(&path).unwrap()));
+    let h = Harness::normal_with_db(db.clone());
+    for (guid, expected) in [(A, owner), (B, peer)] {
+        let mut c = h.join(guid, 0).await.unwrap();
+        let out = h.load(&mut c).await;
+        assert!(objects(&out, 0x500).is_empty());
+        assert_eq!(character(&db, guid).unwrap().unwrap(), expected);
+        h.detach(c.session).await;
+    }
+    h.stop().await;
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn inventory_drop_actor_queued_use_swap_and_death_obey_authoritative_order() {
+    for use_first in [true, false] {
+        let h = Harness::normal();
+        let (mut a, _) = h.enter_route(A, 0).await;
+        h.inspect(move |s| {
+            let mut room = s.worlds[&0].clone();
+            room.character_mut(a.avatar).stats.insert(1, 50);
+            s.commit(&room, &s.worlds[&0]).unwrap();
+            s.worlds.insert(0, room);
+        })
+        .await;
+        drain(&mut a);
+        let first = if use_first {
+            packet(15, |w| {
+                w.i32(a.avatar).u8(4).i32(-1).f32(0.).f32(0.);
+            })
+        } else {
+            equipment_swap((a.avatar, 4, 0xa22), (a.avatar, 5, -1))
+        };
+        let mut results = vec![];
+        for p in [first, inventory_drop_packet(a.avatar, 4, 0xa22)] {
+            let (reply, result) = oneshot::channel();
+            h.commands
+                .send(Command::Input {
+                    received: Instant::now(),
+                    session: a.session,
+                    packet: p,
+                    reply,
+                })
+                .await
+                .unwrap();
+            results.push(result);
+        }
+        results.remove(0).await.unwrap().unwrap();
+        assert!(results.remove(0).await.unwrap().is_err());
+        assert!(objects(&drain(&mut a), 0x500).is_empty());
+        let p = character(&h.db, A).unwrap().unwrap();
+        assert_eq!(
+            (p.stats[&12], p.stats[&13]),
+            (-1, if use_first { -1 } else { 0xa22 })
+        );
+        if !use_first {
+            h.input(a.session, inventory_drop_packet(a.avatar, 5, 0xa22))
+                .await
+                .unwrap();
+            assert_eq!(objects(&drain(&mut a), 0x500).len(), 1);
+        }
+        h.stop().await;
+    }
+    let h = Harness::normal();
+    let (mut a, _) = h.enter_route(A, 0).await;
+    h.inspect(move |s| {
+        let room = s.worlds.get_mut(&0).unwrap();
+        crate::world::shore_runtime_tests::isolate_population(room);
+        crate::world::progression_runtime_tests::lethal_enemy_bullet(room, a.avatar);
+    })
+    .await;
+    let (tick_reply, tick_result) = oneshot::channel();
+    let (drop_reply, drop_result) = oneshot::channel();
+    h.commands
+        .send(Command::Tick(Duration::from_millis(50), tick_reply))
+        .await
+        .unwrap();
+    h.commands
+        .send(Command::Input {
+            received: Instant::now(),
+            session: a.session,
+            packet: inventory_drop_packet(a.avatar, 4, 0xa22),
+            reply: drop_reply,
+        })
+        .await
+        .unwrap();
+    tick_result.await.unwrap().unwrap();
+    drop_result.await.unwrap().unwrap(); // Existing postdeath policy discards in-flight input.
+    let dead = character(&h.db, A).unwrap().unwrap();
+    assert!(!dead.alive);
+    assert_eq!(dead.stats[&12], 0xa22);
+    assert!(objects(&drain(&mut a), 0x500).is_empty());
+    assert!(
+        h.inspect(|s| crate::world::progression_runtime_tests::bags(&s.worlds[&0]))
+            .await
+            .is_empty()
+    );
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn inventory_drop_actor_buffered_weapon_and_stale_session_cannot_release_or_drop() {
+    let h = Harness::normal();
+    let (mut old, _) = h.enter_route(A, 0).await;
+    let (mut b, _) = h.enter_route(B, 0).await;
+    drain(&mut old);
+    drain(&mut b);
+    let saved = character(&h.db, A).unwrap().unwrap();
+    let origin = (saved.x + 0.3, saved.y);
+    h.input(old.session, weapon_native_shot(old.avatar, 1, origin, 0.))
+        .await
+        .unwrap();
+    assert!(drain(&mut b).is_empty());
+    h.input(old.session, inventory_drop_packet(old.avatar, 0, 0xa97))
+        .await
+        .unwrap();
+    let out = drain(&mut b);
+    assert_eq!(objects(&out, 0x500).len(), 1);
+    assert!(weapon_peer_shots(&out).is_empty());
+    assert!(
+        h.input(old.session, weapon_native_shot(old.avatar, 2, origin, 0.))
+            .await
+            .is_err()
+    );
+    assert!(weapon_peer_shots(&drain(&mut b)).is_empty());
+    h.detach(old.session).await;
+    let mut current = h.join(A, 0).await.unwrap();
+    h.load(&mut current).await;
+    drain(&mut b);
+    assert_ne!(old.avatar, current.avatar);
+    assert!(
+        h.input(old.session, inventory_drop_packet(old.avatar, 4, 0xa22))
+            .await
+            .is_err()
+    );
+    assert!(
+        h.input(current.session, inventory_drop_packet(old.avatar, 4, 0xa22))
+            .await
+            .is_err()
+    );
+    assert!(drain(&mut current).is_empty() && drain(&mut b).is_empty());
+    assert_eq!(character(&h.db, A).unwrap().unwrap().stats[&12], 0xa22);
+    assert_eq!(
+        h.inspect(|s| crate::world::progression_runtime_tests::bags(&s.worlds[&0]))
+            .await
+            .len(),
+        1
+    );
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn inventory_drop_actor_full_or_closed_output_cannot_undo_commit_or_replay_transfer() {
+    for closed in [false, true] {
+        let h = Harness::normal();
+        let (mut a, _) = h.enter_route(A, 0).await;
+        let (mut b, _) = h.enter_route(B, 0).await;
+        drain(&mut a);
+        drain(&mut b);
+        if closed {
+            a.output.close();
+        } else {
+            h.inspect(move |s| {
+                let output = &s.sessions[&a.session].output;
+                for _ in 0..OUTPUT_CAPACITY {
+                    output.try_send(vec![]).unwrap();
+                }
+                assert!(output.try_send(vec![]).is_err());
+            })
+            .await;
+        }
+        h.input(a.session, inventory_drop_packet(a.avatar, 4, 0xa22))
+            .await
+            .unwrap();
+        assert_eq!(character(&h.db, A).unwrap().unwrap().stats[&12], -1);
+        assert!(
+            !h.inspect(move |s| s.sessions.contains_key(&a.session))
+                .await
+        );
+        assert!(drain(&mut a).is_empty());
+        assert_eq!(objects(&drain(&mut b), 0x500).len(), 1);
+        let mut current = h.join(A, 0).await.unwrap();
+        let out = h.load(&mut current).await;
+        assert_eq!(equipment_wire(&out, 10, current.avatar)[&12], -1);
+        assert_eq!(objects(&out, 0x500).len(), 1);
+        assert!(
+            h.input(
+                current.session,
+                inventory_drop_packet(current.avatar, 4, 0xa22)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            h.inspect(|s| crate::world::progression_runtime_tests::bags(&s.worlds[&0]))
+                .await
+                .len(),
+            1
+        );
+        h.stop().await;
+    }
+}
