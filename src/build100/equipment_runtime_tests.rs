@@ -466,6 +466,7 @@ fn equipment_runtime_attack_defense_projectile_effects_and_lava_bypass_fixture_i
         r.entities.clear();
         let p = r.character(1);
         let bullet = Bullet {
+            victims: BTreeSet::new(),
             flight: tests::normal_flight(0.1, 2.),
             owner: 999,
             id: 8,

@@ -370,6 +370,7 @@ fn realm_entry_projectile_cover_stops_enemy_shots_at_static_rock_not_nowalk_grou
     let owner = r.entities.values().find(|e| e.kind == 0x804).unwrap().id;
     let hp = r.character(1).stats[&1];
     let shot = Bullet {
+        victims: BTreeSet::new(),
         flight: tests::normal_flight(14., 1.),
         owner,
         id: 250,
@@ -397,6 +398,7 @@ fn realm_entry_projectile_cover_stops_enemy_shots_at_static_rock_not_nowalk_grou
     let (c, mut r) = room(false);
     assert!(r.map.as_ref().unwrap().ground(0, 0).unwrap().no_walk);
     r.bullets.push(Bullet {
+        victims: BTreeSet::new(),
         flight: tests::normal_flight(1., 1.),
         owner: 1,
         id: 251,

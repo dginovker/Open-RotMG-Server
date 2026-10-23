@@ -102,6 +102,7 @@ pub fn snapshot(room: &Room) -> String {
             (
                 b.owner,
                 b.id,
+                &b.victims,
                 b.origin.0.to_bits(),
                 b.origin.1.to_bits(),
                 b.age.to_bits(),

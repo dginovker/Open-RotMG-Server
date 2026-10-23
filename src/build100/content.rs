@@ -227,7 +227,7 @@ impl Object {
     }
     pub fn normal_projectile(&self, id: u8) -> Result<&Projectile> {
         let projectile = self.unique_projectile(id)?;
-        // Nested equip activations are inert in the original Projectile; Continues needs unshipped multihit authority.
+        // Nested equip activations are inert in the original Projectile; ordinary Continues has no admitted multihit authority.
         ensure!(
             !projectile.continues
                 && projectile
@@ -263,7 +263,7 @@ impl Object {
     }
     pub fn quiver_projectile(&self) -> Result<&Projectile> {
         ensure!(
-            matches!(self.id, 0xa61 | 0xa62)
+            matches!(self.id, 0xa61..=0xa63)
                 && self.class == "Equipment"
                 && self.slot_type == Some(15)
                 && !self.consumable
@@ -272,7 +272,11 @@ impl Object {
                 && self.num_projectiles == 1
                 && self.rate_of_fire.is_none()
                 && self.arc_gap_radians == std::f32::consts::PI / 16.
-                && self.bonuses.is_empty()
+                && (if self.id == 0xa63 {
+                    self.bonuses == [(28, 2)]
+                } else {
+                    self.bonuses.is_empty()
+                })
                 && self.projectiles.len() == 1,
             "unsupported normal quiver shape"
         );
@@ -284,12 +288,18 @@ impl Object {
         ensure!(
             self.effects == slow
                 && projectile.effects == slow
-                && projectile.features == ["ConditionEffect"]
-                && !projectile.continues
+                && (if self.id == 0xa63 {
+                    projectile.features == ["ConditionEffect", "Continues"]
+                        && projectile.continues
+                        && projectile.visual == "Green Arrow"
+                } else {
+                    projectile.features == ["ConditionEffect"]
+                        && !projectile.continues
+                        && projectile.visual == "Red Arrow"
+                })
                 && !projectile.wavy
                 && projectile.amplitude == 0.
                 && projectile.frequency == 1.
-                && projectile.visual == "Red Arrow"
                 && projectile.speed == 15.
                 && projectile.lifetime == 1.
                 && self.root_damage == Some((projectile.min, projectile.max))

@@ -50,6 +50,7 @@ pub fn encounter(room: &mut Room, c: &Content, owner: i32, shots: usize) -> i32 
     );
     for bullet in 0..shots {
         room.bullets.push(Bullet {
+            victims: BTreeSet::new(),
             flight: tests::normal_flight(0.1, 2.),
             owner,
             id: bullet as u8,
@@ -88,6 +89,7 @@ pub fn lethal_enemy_bullet(room: &mut Room, player: i32) {
     let p = room.character(player);
     let (x, y) = (p.x, p.y);
     room.bullets.push(Bullet {
+        victims: BTreeSet::new(),
         flight: tests::normal_flight(0.1, 2.),
         owner: room.next_id,
         id: 254,
