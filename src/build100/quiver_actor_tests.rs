@@ -67,8 +67,12 @@ fn shot_ids(out: &[Packet], owner: i32) -> Vec<u8> {
 }
 #[tokio::test]
 async fn quiver_actor_one_payment_suppressed_caster_one_peer_shoot_then_mp_status_no_replay() {
-    for item in [0xa61, 0xa63] {
-        let remaining = if item == 0xa61 { 40 } else { 20 };
+    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+        let remaining = match item {
+            0xa61 => 40,
+            0xa65 => 0,
+            _ => 20,
+        };
         let h = Harness::normal();
         let mut a = archer_with_item(&h, A, 0, item).await;
         let (mut b, _) = h.enter(B).await;
@@ -116,7 +120,12 @@ async fn quiver_actor_one_payment_suppressed_caster_one_peer_shoot_then_mp_statu
         h.detach(a.session).await;
         let mut again = h.join(A, 0).await.unwrap();
         let loaded = h.load(&mut again).await;
-        let bonus = if item == 0xa63 { 2 } else { 0 };
+        let bonus = match item {
+            0xa63 => 2,
+            0xa64 => 3,
+            0xa65 => 5,
+            _ => 0,
+        };
         assert_eq!(
             quiver::stats(&loaded, 10, again.avatar)[&28],
             paid.stats[&28] + bonus
@@ -183,8 +192,12 @@ async fn quiver_actor_marker_survives_real_pong_move_tick_and_advisory_report_wi
 }
 #[tokio::test]
 async fn quiver_actor_sql_begin_at_each_phase_and_write_at8_preserve_actual_prephase() {
-    for item in [0xa61, 0xa63] {
-        let remaining = if item == 0xa61 { 40 } else { 20 };
+    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+        let remaining = match item {
+            0xa61 => 40,
+            0xa65 => 0,
+            _ => 20,
+        };
         for phase in [8, 15] {
             for begin in [false, true] {
                 let h = Harness::normal();
@@ -251,8 +264,12 @@ async fn quiver_actor_sql_begin_at_each_phase_and_write_at8_preserve_actual_prep
 }
 #[tokio::test]
 async fn quiver_actor_actual_dispatcher_storage_failure_fatal_before8_or_after_paid8() {
-    for item in [0xa61, 0xa63] {
-        let remaining = if item == 0xa61 { 40 } else { 20 };
+    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+        let remaining = match item {
+            0xa61 => 40,
+            0xa65 => 0,
+            _ => 20,
+        };
         for phase in [8, 15] {
             for begin in [false, true] {
                 if phase == 15 && !begin {
@@ -341,8 +358,12 @@ async fn quiver_actor_current_whole_room_owner_generation_corruption_fails_close
 }
 #[tokio::test]
 async fn quiver_actor_postcommit_full_closed_peer8_and_caster15_detach_without_refund_or_replay() {
-    for item in [0xa61, 0xa63] {
-        let remaining = if item == 0xa61 { 40 } else { 20 };
+    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+        let remaining = match item {
+            0xa61 => 40,
+            0xa65 => 0,
+            _ => 20,
+        };
         for caster in [false, true] {
             for closed in [false, true] {
                 let h = Harness::normal();
@@ -400,8 +421,12 @@ async fn quiver_actor_postcommit_full_closed_peer8_and_caster15_detach_without_r
 }
 #[tokio::test]
 async fn quiver_actor_caster8_suppression_defers_failed_output_to_status_and_never_refunds() {
-    for item in [0xa61, 0xa63] {
-        let remaining = if item == 0xa61 { 40 } else { 20 };
+    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+        let remaining = match item {
+            0xa61 => 40,
+            0xa65 => 0,
+            _ => 20,
+        };
         let h = Harness::normal();
         let mut a = archer_with_item(&h, A, 0, item).await;
         let (mut b, _) = h.enter(B).await;
@@ -422,8 +447,12 @@ async fn quiver_actor_caster8_suppression_defers_failed_output_to_status_and_nev
 }
 #[tokio::test]
 async fn quiver_actor_disconnect_or_transfer_after8_keep_payment_and_forget_marker() {
-    for item in [0xa61, 0xa63] {
-        let remaining = if item == 0xa61 { 40 } else { 20 };
+    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+        let remaining = match item {
+            0xa61 => 40,
+            0xa65 => 0,
+            _ => 20,
+        };
         for transfer in [false, true] {
             let h = Harness::normal();
             let mut a = archer_with_item(&h, A, if transfer { -1 } else { 0 }, item).await;
@@ -500,75 +529,205 @@ async fn quiver_actor_failed_swap_drop_teleport_transactions_retain_paid_marker_
 }
 
 #[tokio::test]
-async fn quiver_actor_iron_advance_actual_character_write_failure_installs_no_candidate_or_output()
-{
-    for dispatcher in [false, true] {
-        let h = Harness::normal();
-        let mut a = archer_with_item(&h, A, 0, 0xa63).await;
-        let (mut b, _) = h.enter(B).await;
-        let avatar = a.avatar;
-        let targets = h
-            .inspect(move |s| {
-                world::progression_runtime_tests::guaranteed(&mut s.content, 1);
-                quiver::iron_collision_fixture(s.worlds.get_mut(&0).unwrap(), &s.content, avatar)
-            })
-            .await;
-        h.input(a.session, shot(&h, &a, 96).await).await.unwrap();
-        h.input(a.session, cast(a.avatar, 1, a.avatar, (0., 0.)))
-            .await
-            .unwrap();
-        assert_eq!(character(&h.db, A).unwrap().unwrap().stats[&4], 20);
-        drain(&mut a);
-        drain(&mut b);
-        let before = state(&h).await;
-        h.inspect(move |s| {
-            let room = &s.worlds[&0];
-            let mut candidate = room.clone();
-            let events = candidate.advance(0.2, &s.content).unwrap();
-            quiver::assert_iron_collision(&candidate, targets);
-            assert_eq!(events.iter().filter(|p| p.id == 9).count(), 2);
-            assert!(candidate.character(avatar).stats[&6] > room.character(avatar).stats[&6]);
-            assert_ne!(quiver::snapshot(&candidate), quiver::snapshot(room));
-            quiver::assert_iron_reward_candidate(room, &candidate);
-        })
-        .await;
-        h.db.lock().unwrap().execute_batch("CREATE TRIGGER fail_iron_advance BEFORE UPDATE ON build100_characters BEGIN SELECT RAISE(ABORT,'injected Iron collision reward write'); END;").unwrap();
-        if dispatcher {
-            assert!(
-                h.tick(0.2)
+async fn quiver_actor_iron_steel_golden_advance_begin_write_failure_installs_no_candidate_or_output()
+ {
+    for item in [0xa63, 0xa64, 0xa65] {
+        for begin in [false, true] {
+            for dispatcher in [false, true] {
+                let h = Harness::normal();
+                let mut a = archer_with_item(&h, A, 0, item).await;
+                let mut b = if item == 0xa64 {
+                    archer_with_item(&h, B, 0, item).await
+                } else {
+                    h.enter(B).await.0
+                };
+                let peer = b.avatar;
+                let avatar = a.avatar;
+                let targets = h
+                    .inspect(move |s| {
+                        world::progression_runtime_tests::guaranteed(&mut s.content, 1);
+                        let room = s.worlds.get_mut(&0).unwrap();
+                        let targets = quiver::iron_collision_fixture(room, &s.content, avatar);
+                        if item == 0xa64 {
+                            room.character_mut(peer).x += 2.;
+                        }
+                        targets
+                    })
+                    .await;
+                h.input(a.session, shot(&h, &a, 96).await).await.unwrap();
+                if item == 0xa64 {
+                    h.input(b.session, shot(&h, &b, 95).await).await.unwrap();
+                    h.input(b.session, cast(b.avatar, 1, b.avatar, (0., 0.)))
+                        .await
+                        .unwrap();
+                }
+                h.input(a.session, cast(a.avatar, 1, a.avatar, (0., 0.)))
                     .await
-                    .unwrap_err()
-                    .contains("fatal build100 persistence")
-            );
-            assert_eq!(rows(&h.db), before.1);
-            assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
-            drop(h.commands);
-            assert!(h.task.await.unwrap().unwrap_err().is::<StorageFailure>());
-        } else {
-            assert!(
-                h.inspect(|s| s
-                    .tick(Duration::from_secs_f64(0.2))
-                    .unwrap_err()
-                    .is::<StorageFailure>())
-                    .await
-            );
-            assert_eq!(state(&h).await, before);
-            assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
-            h.db.lock()
-                .unwrap()
-                .execute_batch("DROP TRIGGER fail_iron_advance")
-                .unwrap();
-            h.tick(0.2).await.unwrap();
-            h.inspect(move |s| quiver::assert_iron_collision(&s.worlds[&0], targets))
+                    .unwrap();
+                assert_eq!(
+                    character(&h.db, A).unwrap().unwrap().stats[&4],
+                    if item == 0xa65 { 0 } else { 20 }
+                );
+                drain(&mut a);
+                drain(&mut b);
+                let before = state(&h).await;
+                h.inspect(move |s| {
+                    let room = &s.worlds[&0];
+                    let mut candidate = room.clone();
+                    let events = candidate.advance(0.2, &s.content).unwrap();
+                    quiver::assert_quiver_collision(&candidate, targets, item);
+                    assert_eq!(events.iter().filter(|p| p.id == 9).count(), 2);
+                    assert!(
+                        candidate.character(avatar).stats[&6] > room.character(avatar).stats[&6]
+                    );
+                    assert_ne!(quiver::snapshot(&candidate), quiver::snapshot(room));
+                    quiver::assert_iron_reward_candidate(room, &candidate);
+                })
                 .await;
-            for client in [&mut a, &mut b] {
-                let out = drain(client);
-                // Publication omits the already removed victim's Damage9; its Drop still retires the view.
-                assert_eq!(out.iter().filter(|p| p.id == 9).count(), 1);
-                assert!(shot_ids(&out, avatar).is_empty());
+                h.db.lock().unwrap().execute_batch(if begin { "BEGIN IMMEDIATE" } else { "CREATE TRIGGER fail_quiver_advance BEFORE UPDATE ON build100_characters BEGIN SELECT RAISE(ABORT,'injected quiver collision reward write'); END;" }).unwrap();
+                if dispatcher {
+                    assert!(
+                        h.tick(0.2)
+                            .await
+                            .unwrap_err()
+                            .contains("fatal build100 persistence")
+                    );
+                    assert_eq!(rows(&h.db), before.1);
+                    assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
+                    h.db.lock()
+                        .unwrap()
+                        .execute_batch(if begin {
+                            "ROLLBACK"
+                        } else {
+                            "DROP TRIGGER fail_quiver_advance"
+                        })
+                        .unwrap();
+                    drop(h.commands);
+                    assert!(h.task.await.unwrap().unwrap_err().is::<StorageFailure>());
+                } else {
+                    assert!(
+                        h.inspect(|s| s
+                            .tick(Duration::from_secs_f64(0.2))
+                            .unwrap_err()
+                            .is::<StorageFailure>())
+                            .await
+                    );
+                    assert_eq!(state(&h).await, before);
+                    assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
+                    h.db.lock()
+                        .unwrap()
+                        .execute_batch(if begin {
+                            "ROLLBACK"
+                        } else {
+                            "DROP TRIGGER fail_quiver_advance"
+                        })
+                        .unwrap();
+                    h.tick(0.2).await.unwrap();
+                    h.inspect(move |s| {
+                        quiver::assert_quiver_collision(&s.worlds[&0], targets, item)
+                    })
+                    .await;
+                    for client in [&mut a, &mut b] {
+                        let out = drain(client);
+                        // Publication omits the already removed victim's Damage9; its Drop still retires the view.
+                        assert_eq!(out.iter().filter(|p| p.id == 9).count(), 1);
+                        assert!(shot_ids(&out, avatar).is_empty());
+                    }
+                    assert!(character(&h.db, A).unwrap().unwrap().stats[&4] < 80);
+                    h.stop().await;
+                }
             }
-            assert!(character(&h.db, A).unwrap().unwrap().stats[&4] < 80);
-            h.stop().await;
         }
     }
+}
+
+#[tokio::test]
+async fn quiver_actor_golden_paid_separate_contacts_real_advisory_repair_preserves_paralysis_and_ledger()
+ {
+    let h = Harness::normal();
+    let mut a = archer_with_item(&h, A, 0, 0xa65).await;
+    let (mut b, _) = h.enter(B).await;
+    let avatar = a.avatar;
+    let targets = h
+        .inspect(move |s| {
+            quiver::golden_contact_fixture(s.worlds.get_mut(&0).unwrap(), &s.content, avatar)
+        })
+        .await;
+    h.tick(0.).await.unwrap();
+    drain(&mut a);
+    drain(&mut b);
+    h.input(a.session, shot(&h, &a, 96).await).await.unwrap();
+    assert!(drain(&mut a).is_empty());
+    assert_eq!(shot_ids(&drain(&mut b), avatar), [96]);
+    h.input(a.session, cast(avatar, 1, avatar, (0., 0.)))
+        .await
+        .unwrap();
+    drain(&mut a);
+    drain(&mut b);
+    h.tick(0.05).await.unwrap();
+    for client in [&mut a, &mut b] {
+        let events = drain(client);
+        let mut wire = Reader::new(&events.iter().find(|p| p.id == 9).unwrap().body);
+        assert_eq!(
+            (wire.i32().unwrap(), wire.u8().unwrap(), wire.u8().unwrap()),
+            (targets[0], 14, 3)
+        );
+        wire.i16().unwrap();
+        assert_eq!((wire.u8().unwrap(), wire.i32().unwrap()), (0, avatar));
+    }
+    let first = h
+        .inspect(move |s| quiver::golden_contact_state(&s.worlds[&0], targets))
+        .await;
+    assert!((830..=870).contains(&first.0[0]));
+    assert_eq!(first.0[1], 1000);
+    assert_eq!(first.1, [Some(3.), None]);
+    assert_eq!(first.2, std::collections::BTreeSet::from([targets[0]]));
+    for condition in [1, 14, 1] {
+        let before = state(&h).await;
+        h.input(
+            a.session,
+            world::prediction_runtime_tests::report(targets[0], avatar, 96, condition),
+        )
+        .await
+        .unwrap();
+        let events = drain(&mut a);
+        if condition == 1 {
+            assert_eq!(
+                world::prediction_runtime_tests::target_packets(&events, targets[0]),
+                [11, 10]
+            );
+            assert_eq!(quiver::stats(&events, 10, targets[0])[&29], 8192);
+        } else {
+            assert!(events.is_empty());
+        }
+        assert!(drain(&mut b).is_empty());
+        assert_eq!(state(&h).await, before);
+    }
+    h.tick(0.05).await.unwrap();
+    let repeated = h
+        .inspect(move |s| quiver::golden_contact_state(&s.worlds[&0], targets))
+        .await;
+    assert_eq!(repeated.0, first.0);
+    assert_eq!(repeated.1, [Some(2.95), None]);
+    assert_eq!(repeated.2, first.2);
+    for client in [&mut a, &mut b] {
+        assert!(drain(client).iter().all(|p| p.id != 9));
+    }
+    h.tick(0.2).await.unwrap();
+    let second = h
+        .inspect(move |s| quiver::golden_contact_state(&s.worlds[&0], targets))
+        .await;
+    assert_eq!(second.0, [first.0[0], first.0[0]]);
+    assert_eq!(second.1, [Some(2.75), Some(3.)]);
+    assert_eq!(second.2, std::collections::BTreeSet::from(targets));
+    for client in [&mut a, &mut b] {
+        let events = drain(client);
+        assert_eq!(events.iter().filter(|p| p.id == 9).count(), 1);
+        assert!(shot_ids(&events, avatar).is_empty());
+        for target in targets {
+            assert_eq!(quiver::stats(&events, 13, target)[&29], 8192);
+        }
+    }
+    assert_eq!(character(&h.db, A).unwrap().unwrap().stats[&6], 0);
+    h.stop().await;
 }

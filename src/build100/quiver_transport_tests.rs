@@ -3,8 +3,12 @@ use super::*;
 #[tokio::test]
 async fn quiver_transport_encrypted_split_coalesced_serial_awaited_replies_no_adjacency_or_deadlock()
  {
-    for item in [0xa61, 0xa63] {
-        let remaining = if item == 0xa61 { 40 } else { 20 };
+    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+        let remaining = match item {
+            0xa61 => 40,
+            0xa65 => 0,
+            _ => 20,
+        };
         for split in [false, true] {
             let h = Harness::normal();
             let mut a = archer_with_item(&h, A, 0, item).await;

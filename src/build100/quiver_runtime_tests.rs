@@ -16,7 +16,12 @@ fn native(owner: i32, id: u8, kind: i16, origin: (f32, f32), angle: f32, claim: 
     packet(8, |w| {
         w.u8(id)
             .i32(owner)
-            .u8(if kind == 0xa63 { 9 } else { 10 })
+            .u8(match kind {
+                0xa63 => 9,
+                0xa64 => 11,
+                0xa65 => 12,
+                _ => 10,
+            })
             .i16(kind);
         for value in [origin.0, origin.1, angle] {
             w.0.extend(value.to_be_bytes());
@@ -27,11 +32,17 @@ fn native(owner: i32, id: u8, kind: i16, origin: (f32, f32), angle: f32, claim: 
 #[test]
 fn quiver_runtime_native_paid_shoot8_then_nonpaying_use15_original_repaired() {
     for repaired in [false, true] {
-        for (item, cost, min) in [(0xa61, 60, 50), (0xa62, 80, 70), (0xa63, 80, 90)] {
+        for (item, cost, min, max) in [
+            (0xa61, 60, 50, 70),
+            (0xa62, 80, 70, 90),
+            (0xa63, 80, 90, 110),
+            (0xa64, 80, 110, 130),
+            (0xa65, 100, 130, 170),
+        ] {
             let (c, mut room) = setup(repaired);
             archer(&mut room, &c, 1, item);
             let mut rng = room.rng.clone();
-            let expected = (f64::from(min) + 20. * rng.gen_range(0.0..1.0)) as i32;
+            let expected = (f64::from(min) + f64::from(max - min) * rng.gen_range(0.0..1.0)) as i32;
             let input = fire(&room, 1, 96);
             let events = room
                 .handle(1, input, &c)
@@ -93,7 +104,8 @@ pub(crate) fn snapshot(room: &Room) -> String {
         (
             shore_runtime_tests::snapshot(room),
             players,
-            &room.enemy_slows
+            &room.enemy_slows,
+            &room.enemy_paralysis
         )
     )
 }
@@ -144,10 +156,6 @@ fn quiver_runtime_exact_tuples_and_contextual_whitelist_reject_compound_deferred
             }
         }
         archer(&mut room, &c, 1, 0xa61);
-        for kind in [0xa64, 0xa65] {
-            room.character_mut(1).stats.insert(9, kind);
-            reject(&c, &room, fire(&room, 1, 1));
-        }
         room.character_mut(1).stats.insert(9, 0xa61);
         for case in 0..18 {
             let original = c.get(0xa61).unwrap().clone();
@@ -191,7 +199,7 @@ fn quiver_runtime_exact_tuples_and_contextual_whitelist_reject_compound_deferred
 }
 #[test]
 fn quiver_runtime_native_geometry_body_owner_id_visual_and_claim_boundaries() {
-    for item in [0xa61, 0xa63] {
+    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
         let (c, mut room) = setup(false);
         archer(&mut room, &c, 1, item);
         let (x, y) = (room.character(1).x, room.character(1).y);
@@ -235,6 +243,9 @@ fn quiver_runtime_native_geometry_body_owner_id_visual_and_claim_boundaries() {
         let mut visual = fire(&room, 1, 1);
         visual.body[5] = if item == 0xa63 { 10 } else { 9 };
         reject(&c, &room, visual);
+        let mut unknown_visual = fire(&room, 1, 1);
+        unknown_visual.body[5] = 255;
+        reject(&c, &room, unknown_visual);
         for angle in [std::f32::consts::PI, -std::f32::consts::PI, 0.37] {
             let mut r = room.clone();
             let origin = (x + 1.999, y);
@@ -256,9 +267,18 @@ fn quiver_runtime_native_geometry_body_owner_id_visual_and_claim_boundaries() {
 #[test]
 fn quiver_runtime_payment_resources_cooldown_conditions_unscaled_and_signed_carry() {
     use crate::content::Condition;
-    for (kind, cost) in [(0xa61, 60), (0xa62, 80), (0xa63, 80)] {
+    for (kind, cost) in [
+        (0xa61, 60),
+        (0xa62, 80),
+        (0xa63, 80),
+        (0xa64, 80),
+        (0xa65, 100),
+    ] {
         let (c, mut room) = setup(false);
         archer(&mut room, &c, 1, kind);
+        room.character_mut(1)
+            .stats
+            .insert(3, if kind == 0xa65 { 101 } else { 100 });
         for mp in [cost - 1, cost, cost + 1] {
             let mut r = room.clone();
             r.character_mut(1).stats.insert(4, mp);
@@ -307,7 +327,11 @@ fn quiver_runtime_payment_resources_cooldown_conditions_unscaled_and_signed_carr
         for attack in [0, 12, 75] {
             let mut r = room.clone();
             let p = r.character_mut(1);
-            p.stats.extend([(20, attack), (4, 99), (1, 99)]);
+            p.stats.extend([
+                (20, attack),
+                (4, if kind == 0xa65 { 100 } else { 99 }),
+                (1, 99),
+            ]);
             p.resources_carry = Some(ResourceCarry {
                 hp_remainder: 0.25,
                 mp_remainder: 0.25,
@@ -446,7 +470,7 @@ fn bow(room: &Room, c: &Content, id: u8) -> Packet {
 }
 #[test]
 fn quiver_runtime_shared_native_ids_wrap_retired_reuse_live_and_reserved_burst_collisions() {
-    for item in [0xa61, 0xa63] {
+    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
         let (mut c, mut room) = setup(false);
         archer(&mut room, &c, 1, item);
         let p = bow(&room, &c, 95);
@@ -534,45 +558,57 @@ pub(crate) fn stats(out: &[Packet], packet_id: u8, id: i32) -> BTreeMap<u8, i32>
     panic!("missing {packet_id}/{id}")
 }
 #[test]
-fn quiver_runtime_first_swept_hit_damage9_slow_projection_next_step_refresh_expiry() {
-    let (c, mut room) = setup(false);
-    archer(&mut room, &c, 1, 0xa61);
-    room.shore = None;
-    let (x, y) = (room.character(1).x, room.character(1).y);
-    let first = target(&mut room, &c, (x + 2., y), 1000);
-    let second = target(&mut room, &c, (x + 3., y), 1000);
-    room.enemy_slows.insert(first, 10.);
-    let p = fire(&room, 1, 1);
-    room.handle(1, p, &c).unwrap();
-    let damage = room.bullets[0].damage;
-    let events = room.advance(0.2, &c).unwrap();
-    assert!(room.bullets.is_empty());
-    assert_eq!(room.entities[&first].stats[&1], 1000 - damage);
-    assert_eq!(room.entities[&second].stats[&1], 1000);
-    assert_eq!(room.enemy_slows[&first], 3.); // overwrite, including a previously longer remainder
-    assert!(!room.enemy_slows.contains_key(&second));
-    let mut r = Reader::new(&events.iter().find(|p| p.id == 9).unwrap().body);
-    assert_eq!(
-        (r.i32().unwrap(), r.u8().unwrap(), r.u8().unwrap()),
-        (first, 4, 3)
-    );
-    assert_eq!(r.i16().unwrap(), damage as i16);
-    assert_eq!((r.u8().unwrap(), r.i32().unwrap()), (1, 1));
-    r.done().unwrap();
-    let out = room.publication(1, &events, &c).unwrap();
-    assert_eq!(stats(&out, 10, first)[&29], 8);
-    assert_eq!(stats(&out, 13, first)[&29], 8);
-    assert!(!stats(&out, 13, first).contains_key(&25));
-    assert_eq!(room.character(1).stats[&25], 0);
-    room.advance(2.875, &c).unwrap();
-    assert_eq!(room.enemy_slows[&first], 0.125);
-    let events = room.advance(0.125, &c).unwrap();
-    assert!(!room.enemy_slows.contains_key(&first));
-    assert_eq!(
-        stats(&room.publication(1, &events, &c).unwrap(), 13, first)[&29],
-        0
-    );
-    assert_eq!(room.entities[&first].stats[&1], 1000 - damage);
+fn quiver_runtime_first_swept_hit_damage9_slow_or_paralyzed_projection_next_step_refresh_expiry() {
+    for kind in [0xa61, 0xa62, 0xa64] {
+        let (c, mut room) = setup(false);
+        archer(&mut room, &c, 1, kind);
+        room.shore = None;
+        let (x, y) = (room.character(1).x, room.character(1).y);
+        let first = target(&mut room, &c, (x + 2., y), 1000);
+        let second = target(&mut room, &c, (x + 3., y), 1000);
+        if kind == 0xa64 {
+            room.enemy_paralysis.insert(first, 10.);
+        } else {
+            room.enemy_slows.insert(first, 10.);
+        }
+        let p = fire(&room, 1, 1);
+        room.handle(1, p, &c).unwrap();
+        let damage = room.bullets[0].damage;
+        let events = room.advance(0.2, &c).unwrap();
+        assert!(room.bullets.is_empty());
+        assert_eq!(room.entities[&first].stats[&1], 1000 - damage);
+        assert_eq!(room.entities[&second].stats[&1], 1000);
+        assert_eq!(quiver_timers(&room, kind)[&first], 3.); // overwrite, including a previously longer remainder
+        assert!(!quiver_timers(&room, kind).contains_key(&second));
+        let mut r = Reader::new(&events.iter().find(|p| p.id == 9).unwrap().body);
+        assert_eq!(
+            (r.i32().unwrap(), r.u8().unwrap(), r.u8().unwrap()),
+            (first, if kind == 0xa64 { 14 } else { 4 }, 3)
+        );
+        assert_eq!(r.i16().unwrap(), damage as i16);
+        assert_eq!((r.u8().unwrap(), r.i32().unwrap()), (1, 1));
+        r.done().unwrap();
+        let out = room.publication(1, &events, &c).unwrap();
+        assert_eq!(
+            stats(&out, 10, first)[&29],
+            if kind == 0xa64 { 8192 } else { 8 }
+        );
+        assert_eq!(
+            stats(&out, 13, first)[&29],
+            if kind == 0xa64 { 8192 } else { 8 }
+        );
+        assert!(!stats(&out, 13, first).contains_key(&25));
+        assert_eq!(room.character(1).stats[&25], 0);
+        room.advance(2.875, &c).unwrap();
+        assert_eq!(quiver_timers(&room, kind)[&first], 0.125);
+        let events = room.advance(0.125, &c).unwrap();
+        assert!(!quiver_timers(&room, kind).contains_key(&first));
+        assert_eq!(
+            stats(&room.publication(1, &events, &c).unwrap(), 13, first)[&29],
+            0
+        );
+        assert_eq!(room.entities[&first].stats[&1], 1000 - damage);
+    }
 }
 #[test]
 fn quiver_runtime_slow_halves_chase_return_and_wander_whole_step_then_clears_clocks_unscaled() {
@@ -648,71 +684,92 @@ fn quiver_runtime_slow_halves_chase_return_and_wander_whole_step_then_clears_clo
 }
 #[test]
 fn quiver_runtime_cover_tie_age_lifetime_first_death_rewards_and_cleanup() {
-    let (c, mut base) = setup(false);
-    archer(&mut base, &c, 1, 0xa61);
-    base.shore = None;
-    let (x, y) = (base.character(1).x, base.character(1).y);
-    for (age, delta, hit) in [
-        (0., 0.1, true),
-        (0., 1., false),
-        (0.9, 0.1, false),
-        (0.5, 0.4, true),
-    ] {
-        let mut room = base.clone();
-        let id = target(&mut room, &c, (x + 1.5, y), 5);
-        let p = fire(&room, 1, 1);
-        room.handle(1, p, &c).unwrap();
-        room.bullets[0].age = age;
-        room.advance(delta, &c).unwrap();
-        assert_eq!(!room.entities.contains_key(&id), hit);
-        assert_eq!(room.character(1).stats[&6], if hit { 1 } else { 0 });
-        room.advance(0., &c).unwrap();
-        assert_eq!(room.character(1).stats[&6], if hit { 1 } else { 0 });
-        assert!(!room.enemy_slows.contains_key(&id));
-    }
-    for tie in [false, true] {
-        let mut room = base.clone();
-        let pos = if tie { (x + 0.3, y) } else { (x + 3., y) };
-        let id = target(&mut room, &c, pos, 1000);
-        let wall = c
-            .objects
-            .values()
-            .find(|o| o.is_static && o.occupy_square)
-            .unwrap();
-        let cover = room.allocate_entity().unwrap();
-        room.entities.insert(
-            cover,
-            Entity {
-                id: cover,
-                kind: wall.id,
-                x: if tie { x } else { x + 1. },
-                y,
-                stats: wall.stats.clone(),
-                age: 0.,
-                provenance: Provenance::Map,
-            },
+    for kind in [0xa61, 0xa62, 0xa64] {
+        let (c, mut base) = setup(false);
+        archer(&mut base, &c, 1, kind);
+        base.shore = None;
+        let (x, y) = (base.character(1).x, base.character(1).y);
+        for (age, delta, hit) in [
+            (0., 0.1, true),
+            (0., 1., false),
+            (0.9, 0.1, false),
+            (0.5, 0.4, true),
+        ] {
+            let mut room = base.clone();
+            let id = target(&mut room, &c, (x + 1.5, y), 5);
+            let p = fire(&room, 1, 1);
+            room.handle(1, p, &c).unwrap();
+            room.bullets[0].age = age;
+            room.advance(delta, &c).unwrap();
+            assert_eq!(!room.entities.contains_key(&id), hit);
+            assert_eq!(room.character(1).stats[&6], if hit { 1 } else { 0 });
+            room.advance(0., &c).unwrap();
+            assert_eq!(room.character(1).stats[&6], if hit { 1 } else { 0 });
+            assert!(!quiver_timers(&room, kind).contains_key(&id));
+        }
+        for tie in [false, true] {
+            let mut room = base.clone();
+            let pos = if tie { (x + 0.3, y) } else { (x + 3., y) };
+            let id = target(&mut room, &c, pos, 1000);
+            let wall = c
+                .objects
+                .values()
+                .find(|o| o.is_static && o.occupy_square)
+                .unwrap();
+            let cover = room.allocate_entity().unwrap();
+            room.entities.insert(
+                cover,
+                Entity {
+                    id: cover,
+                    kind: wall.id,
+                    x: if tie { x } else { x + 1. },
+                    y,
+                    stats: wall.stats.clone(),
+                    age: 0.,
+                    provenance: Provenance::Map,
+                },
+            );
+            let p = fire(&room, 1, 1);
+            room.handle(1, p, &c).unwrap();
+            room.advance(0.2, &c).unwrap();
+            assert_eq!(room.entities[&id].stats[&1] < 1000, tie);
+            assert_eq!(quiver_timers(&room, kind).contains_key(&id), tie);
+            assert!(room.bullets.is_empty());
+            assert!(!quiver_timers(&room, kind).contains_key(&cover));
+        }
+        for inside in [false, true] {
+            let mut room = base.clone();
+            room.character_mut(1).y = 0.65;
+            let tangent = target(&mut room, &c, (x + 0.5, 0.), 1000);
+            let inner = inside.then(|| target(&mut room, &c, (x, 0.65), 1000));
+            room.handle(1, native(1, 96, kind, (x, 0.65), 0., 0), &c)
+                .unwrap();
+            assert_eq!(
+                hit_targets(&room.advance(0., &c).unwrap()),
+                inner.into_iter().collect::<Vec<_>>()
+            );
+            assert!(hit_targets(&room.advance(0.2, &c).unwrap()).is_empty());
+            assert_eq!(room.entities[&tangent].stats[&1], 1000);
+            assert!(!quiver_timers(&room, kind).contains_key(&tangent));
+        }
+        // Removal/new population IDs never inherit a transient timer.
+        let id = target(&mut base, &c, (x + 1., y), 1000);
+        if kind == 0xa64 {
+            base.enemy_paralysis.insert(id, 3.);
+        } else {
+            base.enemy_slows.insert(id, 3.);
+        }
+        base.entities.remove(&id);
+        base.advance(0., &c).unwrap();
+        assert!(!quiver_timers(&base, kind).contains_key(&id));
+        let replacement = target(&mut base, &c, (x + 1., y), 1000);
+        assert_ne!(replacement, id);
+        assert_eq!(
+            base.entity_wire_stats(&base.entities[&replacement], &c)
+                .unwrap()[&29],
+            0
         );
-        let p = fire(&room, 1, 1);
-        room.handle(1, p, &c).unwrap();
-        room.advance(0.2, &c).unwrap();
-        assert_eq!(room.entities[&id].stats[&1] < 1000, tie);
-        assert_eq!(room.enemy_slows.contains_key(&id), tie);
-        assert!(room.bullets.is_empty());
-        assert!(!room.enemy_slows.contains_key(&cover));
     }
-    // Removal/new population IDs never inherit a transient timer.
-    let id = target(&mut base, &c, (x + 1., y), 1000);
-    base.enemy_slows.insert(id, 3.);
-    base.entities.remove(&id);
-    base.advance(0., &c).unwrap();
-    assert!(!base.enemy_slows.contains_key(&id));
-    let replacement = target(&mut base, &c, (x + 1., y), 1000);
-    assert_ne!(replacement, id);
-    assert_eq!(
-        base.entity_wire_stats(&base.entities[&replacement], &c)
-            .unwrap()[&29],
-        0
-    );
 }
 #[test]
 fn quiver_runtime_death_clears_receipt_projectile_damage_and_ground() {
@@ -831,60 +888,75 @@ fn quiver_runtime_ground_death_clears_marker_and_predicted_repair_retains_curren
 }
 
 #[test]
-fn quiver_runtime_iron_native8_paid_once_and_continuing_two_targets() {
-    for repaired in [false, true] {
-        let (c, mut room) = setup(repaired);
-        archer(&mut room, &c, 1, 0xa63);
-        room.shore = None;
-        let p = room.character(1);
-        let (x, y) = (p.x, p.y);
-        let a = target(&mut room, &c, (x + 1., y), 500);
-        let b = target(&mut room, &c, (x + 2., y), 500);
-        let input = fire(&room, 1, 96);
-        room.handle(1, input, &c)
-            .expect("Iron native8 must be supported");
-        assert_eq!(room.character(1).stats[&4], 20);
-        let paid = room.character(1).clone();
-        room.handle(1, cast(1, 1, 1, (0., 0.)), &c).unwrap();
-        assert_eq!(room.character(1), &paid);
-        let damage = room.bullets[0].damage;
-        let events = room.advance(0.2, &c).unwrap();
-        assert_eq!(room.bullets.len(), 1);
-        assert_eq!(room.bullets[0].victims, BTreeSet::from([a, b]));
-        assert_eq!(room.bullets[0].id, 96);
-        for id in [a, b] {
-            assert_eq!(room.entities[&id].stats[&1], 500 - damage);
-            assert_eq!(room.enemy_slows[&id], 3.);
+fn quiver_runtime_iron_golden_native8_paid_once_and_continuing_two_targets() {
+    for kind in [0xa63, 0xa65] {
+        for repaired in [false, true] {
+            let (c, mut room) = setup(repaired);
+            archer(&mut room, &c, 1, kind);
+            room.shore = None;
+            let p = room.character(1);
+            let (x, y) = (p.x, p.y);
+            let a = target(&mut room, &c, (x + 1., y), 500);
+            let b = target(&mut room, &c, (x + 2., y), 500);
+            let input = fire(&room, 1, 96);
+            room.handle(1, input, &c)
+                .expect("continuing quiver native8 must be supported");
+            assert_eq!(
+                room.character(1).stats[&4],
+                if kind == 0xa65 { 0 } else { 20 }
+            );
+            let paid = room.character(1).clone();
+            room.handle(1, cast(1, 1, 1, (0., 0.)), &c).unwrap();
+            assert_eq!(room.character(1), &paid);
+            let damage = room.bullets[0].damage;
+            let events = room.advance(0.2, &c).unwrap();
+            assert_eq!(room.bullets.len(), 1);
+            assert_eq!(room.bullets[0].victims, BTreeSet::from([a, b]));
+            assert_eq!(room.bullets[0].id, 96);
+            for id in [a, b] {
+                assert_eq!(room.entities[&id].stats[&1], 500 - damage);
+                assert_eq!(quiver_timers(&room, kind)[&id], 3.);
+            }
+            assert_eq!(events.iter().filter(|p| p.id == 9).count(), 2);
         }
-        assert_eq!(events.iter().filter(|p| p.id == 9).count(), 2);
     }
 }
 
 #[test]
 fn quiver_runtime_continues_damage9_nonretiring_presentation_not_native_acceptance() {
-    let (c, mut room) = setup(false);
-    archer(&mut room, &c, 1, 0xa63);
-    room.shore = None;
-    let p = room.character(1);
-    let position = (p.x + 1., p.y);
-    let victim = target(&mut room, &c, position, 500);
-    let input = fire(&room, 1, 96);
-    room.handle(1, input, &c).unwrap();
-    let damage = room.bullets[0].damage;
-    let events = room.advance(0.1, &c).unwrap();
-    let mut r = Reader::new(&events.iter().find(|p| p.id == 9).unwrap().body);
-    assert_eq!(
-        (r.i32().unwrap(), r.u8().unwrap(), r.u8().unwrap()),
-        (victim, 4, 3)
-    );
-    assert_eq!(r.i16().unwrap(), damage as i16);
-    let (presentation, owner) = (r.u8().unwrap(), r.i32().unwrap());
-    assert!(
-        !(owner >= 0 && presentation > 0),
-        "original M8 removes positive owner/bullet before looking up victim"
-    );
-    assert_eq!((owner, presentation), (1, 0));
-    assert_eq!(room.bullets[0].id, 96);
+    for kind in [0xa63, 0xa65] {
+        let (c, mut room) = setup(false);
+        archer(&mut room, &c, 1, kind);
+        room.shore = None;
+        let p = room.character(1);
+        let position = (p.x + 1., p.y);
+        let victim = target(&mut room, &c, position, 500);
+        let input = fire(&room, 1, 96);
+        room.handle(1, input, &c).unwrap();
+        let damage = room.bullets[0].damage;
+        let events = room.advance(0.1, &c).unwrap();
+        let mut r = Reader::new(&events.iter().find(|p| p.id == 9).unwrap().body);
+        assert_eq!(
+            (r.i32().unwrap(), r.u8().unwrap(), r.u8().unwrap()),
+            (victim, if kind == 0xa65 { 14 } else { 4 }, 3)
+        );
+        assert_eq!(r.i16().unwrap(), damage as i16);
+        let (presentation, owner) = (r.u8().unwrap(), r.i32().unwrap());
+        assert!(
+            !(owner >= 0 && presentation > 0),
+            "original M8 removes positive owner/bullet before looking up victim"
+        );
+        assert_eq!((owner, presentation), (1, 0));
+        assert_eq!(room.bullets[0].id, 96);
+    }
+}
+
+fn quiver_timers(room: &Room, kind: i16) -> &BTreeMap<i32, f32> {
+    if matches!(kind, 0xa64 | 0xa65) {
+        &room.enemy_paralysis
+    } else {
+        &room.enemy_slows
+    }
 }
 
 fn hit_targets(events: &[Packet]) -> Vec<i32> {
@@ -1016,170 +1088,190 @@ fn quiver_runtime_iron_shape_visual_dex_and_noncontinuing_wire_unchanged() {
 }
 
 #[test]
-fn quiver_runtime_iron_separate_contacts_reentry_repair_tombstones_replacement_and_later_payment() {
-    let (c, mut room) = setup(false);
-    for id in [1, 2] {
-        archer(&mut room, &c, id, 0xa63);
-    }
-    room.shore = None;
-    let (x, y) = (room.character(1).x, room.character(1).y);
-    let a = target(&mut room, &c, (x + 1., y), 500);
-    let b = target(&mut room, &c, (x + 5., y), 500);
-    for id in [1, 2] {
-        room.publication(id, &[], &c).unwrap();
-    }
-    let input = fire(&room, 1, 96);
-    room.handle(1, input, &c).unwrap();
-    room.handle(1, cast(1, 1, 1, (0., 0.)), &c).unwrap();
-    let damage = room.bullets[0].damage;
-    assert_eq!(hit_targets(&room.advance(0.05, &c).unwrap()), [a]);
-    assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
-    for condition in [1, 4, 1] {
-        let before = room.clone();
-        let events = room
-            .handle(1, prediction_runtime_tests::report(a, 1, 96, condition), &c)
-            .unwrap();
-        let out = room.publication(1, &events, &c).unwrap();
-        if condition == 1 {
-            assert_eq!(prediction_runtime_tests::target_packets(&out, a), [11, 10]);
-            assert_eq!(stats(&out, 10, a)[&29], 8);
+fn quiver_runtime_iron_golden_separate_contacts_reentry_repair_tombstones_replacement_and_later_payment()
+ {
+    for kind in [0xa63, 0xa65] {
+        let (c, mut room) = setup(false);
+        for id in [1, 2] {
+            archer(&mut room, &c, id, kind);
         }
-        assert!(room.publication(2, &events, &c).unwrap().is_empty());
-        prediction_runtime_tests::authority_unchanged(&before, &room);
-    }
-    assert!(hit_targets(&room.advance(0.05, &c).unwrap()).is_empty());
-    // A fresh native instance or movement back into overlap never replaces Room identity.
-    room.entities.get_mut(&a).unwrap().x = room.bullets[0].x;
-    assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
-    assert_eq!(room.enemy_slows[&a], 2.95);
-    assert_eq!(room.entities[&a].stats[&1], 500 - damage);
-    assert_eq!(hit_targets(&room.advance(0.2, &c).unwrap()), [b]);
-    assert_eq!(room.bullets[0].victims, BTreeSet::from([a, b]));
-    let victims = room.bullets[0].victims.clone();
-    room.character_mut(1).x += 40.;
-    room.publication(1, &[], &c).unwrap();
-    assert!(!room.players[&1].known_objects.contains(&b));
-    room.character_mut(1).x = x;
-    room.publication(1, &[], &c).unwrap();
-    assert_eq!(room.bullets[0].victims, victims);
-    room.entities.remove(&a);
-    let position = (room.bullets[0].x, room.bullets[0].y);
-    let replacement = target(&mut room, &c, position, 500);
-    assert_ne!(replacement, a);
-    assert_eq!(hit_targets(&room.advance(0., &c).unwrap()), [replacement]);
-    assert!(!room.enemy_slows.contains_key(&a));
-    assert_eq!(room.bullets[0].victims, BTreeSet::from([a, b, replacement]));
-    assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
-    room.advance(0.7, &c).unwrap();
-    assert!(room.bullets.is_empty());
-    room.character_mut(1).stats.insert(4, 80);
-    let input = fire(&room, 1, 1);
-    room.handle(1, input, &c).unwrap();
-    assert!(room.bullets[0].victims.is_empty());
-    let second_damage = room.bullets[0].damage;
-    assert_eq!(
-        hit_targets(&room.advance(0.3, &c).unwrap()),
-        [replacement, b]
-    );
-    assert_eq!(room.entities[&b].stats[&1], 500 - damage - second_damage);
-    assert_eq!(room.enemy_slows[&b], 3.);
-}
-
-#[test]
-fn quiver_runtime_iron_cover_entry_order_ties_tangency_t0_and_expiry_before_contacts() {
-    let (c, mut base) = setup(false);
-    archer(&mut base, &c, 1, 0xa63);
-    base.shore = None;
-    let (x, y) = (base.character(1).x, base.character(1).y);
-    for cover_offset in [0., 1., 2., 4.] {
-        let mut room = base.clone();
-        let initial = target(&mut room, &c, (x + 0.3, y), 500);
-        let far = target(&mut room, &c, (x + 3., y), 500);
-        let near = target(&mut room, &c, (x + 1., y), 500);
-        let tie = target(&mut room, &c, (x + 1., y), 500);
-        let wall = c
-            .objects
-            .values()
-            .find(|o| o.is_static && o.occupy_square)
-            .unwrap();
-        let id = target(&mut room, &c, (x + cover_offset, y), 500);
-        room.entities.get_mut(&id).unwrap().kind = wall.id;
-        let input = fire(&room, 1, 1);
+        room.shore = None;
+        let (x, y) = (room.character(1).x, room.character(1).y);
+        let a = target(&mut room, &c, (x + 1., y), 500);
+        let b = target(&mut room, &c, (x + 5., y), 500);
+        for id in [1, 2] {
+            room.publication(id, &[], &c).unwrap();
+        }
+        let input = fire(&room, 1, 96);
         room.handle(1, input, &c).unwrap();
-        assert_eq!(
-            hit_targets(&room.advance(0.25, &c).unwrap()),
-            [initial, near, tie, far]
-        );
-        assert_eq!(room.bullets.len(), 1);
-        assert!(!room.bullets[0].victims.contains(&id));
-    }
-    let mut room = base.clone();
-    let tangent = target(&mut room, &c, (x + 0.5, 0.), 500);
-    let inside = target(&mut room, &c, (x, 0.65), 500);
-    let dead = target(&mut room, &c, (x, 0.65), 0);
-    let input = native(1, 1, 0xa63, (x, 0.65), 0., 0);
-    room.character_mut(1).y = 0.65;
-    room.handle(1, input, &c).unwrap();
-    assert_eq!(hit_targets(&room.advance(0., &c).unwrap()), [inside]);
-    assert!(hit_targets(&room.advance(0.2, &c).unwrap()).is_empty());
-    assert_eq!(room.entities[&tangent].stats[&1], 500);
-    assert!(!room.bullets[0].victims.contains(&dead));
-    for (age, dt, hit) in [
-        (0., 1., false),
-        (0.9, 0.1, false),
-        (0., 1.2, false),
-        (0.5, 0.4, true),
-    ] {
-        let mut room = base.clone();
-        let id = target(&mut room, &c, (x + 2., y), 500);
-        let input = fire(&room, 1, 1);
-        room.handle(1, input, &c).unwrap();
-        room.bullets[0].age = age;
-        let events = room.advance(dt, &c).unwrap();
-        assert_eq!(hit_targets(&events).contains(&id), hit);
-        assert_eq!(room.bullets.is_empty(), !hit);
+        room.handle(1, cast(1, 1, 1, (0., 0.)), &c).unwrap();
+        let damage = room.bullets[0].damage;
+        assert_eq!(hit_targets(&room.advance(0.05, &c).unwrap()), [a]);
+        let after_hit_rng = room.rng.clone().next_u64();
         assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+        for condition in [1, 4, 14, 1] {
+            let before = room.clone();
+            let events = room
+                .handle(1, prediction_runtime_tests::report(a, 1, 96, condition), &c)
+                .unwrap();
+            let out = room.publication(1, &events, &c).unwrap();
+            if condition == 1 {
+                assert_eq!(prediction_runtime_tests::target_packets(&out, a), [11, 10]);
+                assert_eq!(
+                    stats(&out, 10, a)[&29],
+                    if kind == 0xa65 { 8192 } else { 8 }
+                );
+            }
+            assert!(room.publication(2, &events, &c).unwrap().is_empty());
+            prediction_runtime_tests::authority_unchanged(&before, &room);
+        }
+        assert!(hit_targets(&room.advance(0.05, &c).unwrap()).is_empty());
+        // A fresh native instance or movement back into overlap never replaces Room identity.
+        room.entities.get_mut(&a).unwrap().x = room.bullets[0].x;
+        assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+        assert_eq!(quiver_timers(&room, kind)[&a], 2.95);
+        assert_eq!(room.rng.clone().next_u64(), after_hit_rng);
+        assert_eq!(room.character(1).stats[&6], 0);
+        assert_eq!(room.entities[&a].stats[&1], 500 - damage);
+        assert_eq!(hit_targets(&room.advance(0.2, &c).unwrap()), [b]);
+        assert_eq!(room.bullets[0].victims, BTreeSet::from([a, b]));
+        let victims = room.bullets[0].victims.clone();
+        room.character_mut(1).x += 40.;
+        room.publication(1, &[], &c).unwrap();
+        assert!(!room.players[&1].known_objects.contains(&b));
+        room.character_mut(1).x = x;
+        room.publication(1, &[], &c).unwrap();
+        assert_eq!(room.bullets[0].victims, victims);
+        room.entities.remove(&a);
+        let position = (room.bullets[0].x, room.bullets[0].y);
+        let replacement = target(&mut room, &c, position, 500);
+        assert_ne!(replacement, a);
+        assert_eq!(hit_targets(&room.advance(0., &c).unwrap()), [replacement]);
+        assert!(!quiver_timers(&room, kind).contains_key(&a));
+        assert_eq!(room.bullets[0].victims, BTreeSet::from([a, b, replacement]));
+        assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+        room.advance(0.7, &c).unwrap();
+        assert!(room.bullets.is_empty());
+        room.character_mut(1).stats.insert(4, 100);
+        room.character_mut(1).resources_carry = Some(ResourceCarry::ZERO);
+        let input = fire(&room, 1, 1);
+        room.handle(1, input, &c).unwrap();
+        assert!(room.bullets[0].victims.is_empty());
+        let second_damage = room.bullets[0].damage;
+        assert_eq!(
+            hit_targets(&room.advance(0.3, &c).unwrap()),
+            [replacement, b]
+        );
+        assert_eq!(room.entities[&b].stats[&1], 500 - damage - second_damage);
+        assert_eq!(quiver_timers(&room, kind)[&b], 3.);
     }
 }
 
 #[test]
-fn quiver_runtime_iron_buffered_dead_skip_keeps_reservation_and_once_rewards() {
-    let (c, mut room) = setup(false);
-    for id in [1, 2] {
-        archer(&mut room, &c, id, 0xa63);
+fn quiver_runtime_iron_golden_cover_entry_order_ties_tangency_t0_and_expiry_before_contacts() {
+    for kind in [0xa63, 0xa65] {
+        let (c, mut base) = setup(false);
+        archer(&mut base, &c, 1, kind);
+        base.shore = None;
+        let (x, y) = (base.character(1).x, base.character(1).y);
+        for cover_offset in [0., 1., 2., 4.] {
+            let mut room = base.clone();
+            let initial = target(&mut room, &c, (x + 0.3, y), 500);
+            let far = target(&mut room, &c, (x + 3., y), 500);
+            let near = target(&mut room, &c, (x + 1., y), 500);
+            let tie = target(&mut room, &c, (x + 1., y), 500);
+            let wall = c
+                .objects
+                .values()
+                .find(|o| o.is_static && o.occupy_square)
+                .unwrap();
+            let id = target(&mut room, &c, (x + cover_offset, y), 500);
+            room.entities.get_mut(&id).unwrap().kind = wall.id;
+            let input = fire(&room, 1, 1);
+            room.handle(1, input, &c).unwrap();
+            assert_eq!(
+                hit_targets(&room.advance(0.25, &c).unwrap()),
+                [initial, near, tie, far]
+            );
+            assert_eq!(room.bullets.len(), 1);
+            assert!(!room.bullets[0].victims.contains(&id));
+        }
+        let mut room = base.clone();
+        let tangent = target(&mut room, &c, (x + 0.5, 0.), 500);
+        let inside = target(&mut room, &c, (x, 0.65), 500);
+        let dead = target(&mut room, &c, (x, 0.65), 0);
+        let input = native(1, 1, kind, (x, 0.65), 0., 0);
+        room.character_mut(1).y = 0.65;
+        room.handle(1, input, &c).unwrap();
+        assert_eq!(hit_targets(&room.advance(0., &c).unwrap()), [inside]);
+        assert!(hit_targets(&room.advance(0.2, &c).unwrap()).is_empty());
+        assert_eq!(room.entities[&tangent].stats[&1], 500);
+        assert!(!room.bullets[0].victims.contains(&dead));
+        for (age, dt, hit) in [
+            (0., 1., false),
+            (0.9, 0.1, false),
+            (0., 1.2, false),
+            (0.5, 0.4, true),
+        ] {
+            let mut room = base.clone();
+            let id = target(&mut room, &c, (x + 2., y), 500);
+            let input = fire(&room, 1, 1);
+            room.handle(1, input, &c).unwrap();
+            room.bullets[0].age = age;
+            let events = room.advance(dt, &c).unwrap();
+            assert_eq!(hit_targets(&events).contains(&id), hit);
+            assert_eq!(room.bullets.is_empty(), !hit);
+            assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+        }
     }
-    room.shore = None;
-    let (x, y) = (room.character(1).x, room.character(1).y);
-    let dead = target(&mut room, &c, (x + 1., y), 5);
-    let survivor = target(&mut room, &c, (x + 2., y), 500);
-    for owner in [1, 2] {
-        let input = fire(&room, owner, 1);
-        room.handle(owner, input, &c).unwrap();
+}
+
+#[test]
+fn quiver_runtime_iron_golden_buffered_dead_skip_keeps_reservation_and_once_rewards() {
+    for kind in [0xa63, 0xa65] {
+        let (mut c, mut room) = setup(false);
+        progression_runtime_tests::guaranteed(&mut c, 1);
+        for id in [1, 2] {
+            archer(&mut room, &c, id, kind);
+        }
+        room.shore = None;
+        let (x, y) = (room.character(1).x, room.character(1).y);
+        let dead = target(&mut room, &c, (x + 1., y), 5);
+        let survivor = target(&mut room, &c, (x + 2., y), 500);
+        for owner in [1, 2] {
+            let input = fire(&room, owner, 1);
+            room.handle(owner, input, &c).unwrap();
+        }
+        let mut once = room.clone();
+        once.bullets.pop();
+        once.advance(0.2, &c).unwrap();
+        let total: i32 = room.bullets.iter().map(|b| b.damage).sum();
+        let events = room.advance(0.2, &c).unwrap();
+        assert_eq!(hit_targets(&events), [dead, survivor, survivor]);
+        for bullet in &room.bullets {
+            assert_eq!(bullet.victims, BTreeSet::from([dead, survivor]));
+        }
+        assert!(!room.entities.contains_key(&dead));
+        assert!(!quiver_timers(&room, kind).contains_key(&dead));
+        assert_eq!(room.entities[&survivor].stats[&1], 500 - total);
+        for id in [1, 2] {
+            assert_eq!(room.character(id).stats[&6], once.character(id).stats[&6]);
+        }
+        assert_eq!(room.rng.clone().next_u64(), once.rng.clone().next_u64());
+        assert_eq!(room.next_id, once.next_id);
+        assert!(!progression_runtime_tests::bags(&room).is_empty());
+        assert_eq!(
+            progression_runtime_tests::bags(&room),
+            progression_runtime_tests::bags(&once)
+        );
+        assert_eq!(
+            room.entities.values().filter(|e| e.kind == 0x500).count(),
+            once.entities.values().filter(|e| e.kind == 0x500).count()
+        );
+        let xp = room.character(1).stats[&6];
+        assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+        assert_eq!(room.character(1).stats[&6], xp);
     }
-    let mut once = room.clone();
-    once.bullets.pop();
-    once.advance(0.2, &c).unwrap();
-    let total: i32 = room.bullets.iter().map(|b| b.damage).sum();
-    let events = room.advance(0.2, &c).unwrap();
-    assert_eq!(hit_targets(&events), [dead, survivor, survivor]);
-    for bullet in &room.bullets {
-        assert_eq!(bullet.victims, BTreeSet::from([dead, survivor]));
-    }
-    assert!(!room.entities.contains_key(&dead));
-    assert!(!room.enemy_slows.contains_key(&dead));
-    assert_eq!(room.entities[&survivor].stats[&1], 500 - total);
-    for id in [1, 2] {
-        assert_eq!(room.character(id).stats[&6], once.character(id).stats[&6]);
-    }
-    assert_eq!(room.rng.clone().next_u64(), once.rng.clone().next_u64());
-    assert_eq!(room.next_id, once.next_id);
-    assert_eq!(
-        room.entities.values().filter(|e| e.kind == 0x500).count(),
-        once.entities.values().filter(|e| e.kind == 0x500).count()
-    );
-    let xp = room.character(1).stats[&6];
-    assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
-    assert_eq!(room.character(1).stats[&6], xp);
 }
 
 #[test]
@@ -1267,13 +1359,18 @@ pub(crate) fn iron_collision_fixture(room: &mut Room, c: &Content, owner: i32) -
         target(room, c, (x + 2., y), 500),
     ]
 }
-pub(crate) fn assert_iron_collision(room: &Room, targets: [i32; 2]) {
+pub(crate) fn assert_quiver_collision(room: &Room, targets: [i32; 2], kind: i16) {
     assert!(!room.entities.contains_key(&targets[0]));
     assert!(!room.enemy_slows.contains_key(&targets[0]));
+    assert!(!room.enemy_paralysis.contains_key(&targets[0]));
     assert!(room.entities[&targets[1]].stats[&1] < 500);
-    assert_eq!(room.enemy_slows[&targets[1]], 3.);
-    assert_eq!(room.bullets.len(), 1);
-    assert_eq!(room.bullets[0].victims, BTreeSet::from(targets));
+    assert_eq!(quiver_timers(room, kind)[&targets[1]], 3.);
+    if kind == 0xa64 {
+        assert!(room.bullets.is_empty());
+    } else {
+        assert_eq!(room.bullets.len(), 1);
+        assert_eq!(room.bullets[0].victims, BTreeSet::from(targets));
+    }
 }
 pub(crate) fn assert_iron_reward_candidate(before: &Room, candidate: &Room) {
     assert_ne!(
@@ -1282,4 +1379,465 @@ pub(crate) fn assert_iron_reward_candidate(before: &Room, candidate: &Room) {
     );
     assert!(candidate.next_id > before.next_id);
     assert!(candidate.entities.values().any(|e| e.kind == 0x500));
+}
+
+#[test]
+fn quiver_runtime_steel_golden_original_repaired_shapes_dex_and_fail_closed() {
+    use crate::content::Condition;
+    for repaired in [false, true] {
+        let (mut c, mut room) = setup(repaired);
+        archer(&mut room, &c, 1, 0xa64);
+        for (kind, bounds, cost, dex, visual, name, continues) in [
+            (0xa64, (110, 130), 80, 3, 11, "Blue Arrow", false),
+            (0xa65, (130, 170), 100, 5, 12, "Gold Arrow", true),
+        ] {
+            room.character_mut(1).stats.insert(9, i32::from(kind));
+            let original = c.get(kind).unwrap().clone();
+            let p = original.quiver_projectile().unwrap();
+            assert_eq!(
+                (original.root_damage, original.mp_cost),
+                (Some(bounds), Some(cost))
+            );
+            assert_eq!(original.bonuses, [(28, dex)]);
+            assert_eq!(
+                (p.min, p.max, p.speed, p.lifetime),
+                (bounds.0, bounds.1, 15., 1.)
+            );
+            assert_eq!((&*p.visual, p.continues), (name, continues));
+            assert_eq!(c.named(name).unwrap().id, visual);
+            assert_eq!(p.effects, original.effects);
+            assert_eq!(p.effects.len(), 1);
+            assert_eq!(
+                (p.effects[0].condition, p.effects[0].duration_seconds),
+                (Condition::Paralyzed, 3.)
+            );
+            assert_eq!(
+                p.features,
+                if continues {
+                    vec!["ConditionEffect", "Continues"]
+                } else {
+                    vec!["ConditionEffect"]
+                }
+            );
+            assert_eq!(Condition::Paralyzed as u8, 14);
+            assert_eq!(combat::ConditionMask::bit(Condition::Paralyzed), 8192);
+            assert!(original.normal_projectile(0).is_err());
+            assert!(original.arena_projectile(0).is_err());
+            for u in [0., 0.5, 1_f64.next_down()] {
+                assert_eq!(
+                    combat::continuous_damage(
+                        combat::DamageSource::Root(&original),
+                        combat::AttackScaling::Unscaled,
+                        u
+                    )
+                    .unwrap(),
+                    (f64::from(bounds.0) + f64::from(bounds.1 - bounds.0) * u) as i32
+                );
+            }
+            let base = room.character(1).stats[&28];
+            for _ in 0..3 {
+                let player = room.character(1).clone();
+                assert_eq!(
+                    player.equipment_stats(&c).unwrap().get(28).unwrap(),
+                    base + dex
+                );
+                assert_eq!(room.wire_stats(&player, &c).unwrap()[&28], base + dex);
+                room.detach(1);
+                room.attach(1, player, &c).unwrap();
+                assert_eq!(room.character(1).stats[&28], base);
+            }
+            for case in 0..23 {
+                let item = c.objects.get_mut(&kind).unwrap();
+                match case {
+                    0 => item.effects.clear(),
+                    1 => item.effects.push(item.effects[0].clone()),
+                    2 => item.projectiles[0].1.effects.push(item.effects[0].clone()),
+                    3 => item.effects[0].condition = Condition::Slowed,
+                    4 => item.projectiles[0].1.effects[0].condition = Condition::Slowed,
+                    5 => {
+                        item.projectiles[0].1.features =
+                            vec!["Continues".into(), "ConditionEffect".into()]
+                    }
+                    6 => item.projectiles[0].1.features.push("Continues".into()),
+                    7 => item.projectiles[0].1.continues = !continues,
+                    8 => item.bonuses.push((28, dex)),
+                    9 => item.bonuses[0].1 += 1,
+                    10 => item.projectiles[0].1.visual = "Red Arrow".into(),
+                    11 => item.activations.push(item.activations[0].clone()),
+                    12 => {
+                        item.activations[0]
+                            .attributes
+                            .insert("unknown".into(), "1".into());
+                    }
+                    13 => item.projectiles[0].0 = 1,
+                    14 => item.projectiles.push(item.projectiles[0].clone()),
+                    15 => item.root_damage = Some((0, 1)),
+                    16 => item.mp_cost = None,
+                    17 => item.projectiles[0].1.effects[0].duration_seconds = 4.,
+                    18 => item.effects[0].duration_seconds = 4.,
+                    19 => item.projectiles[0].1.features.push("Unknown".into()),
+                    20 => item.projectiles[0].1.speed = 16.,
+                    21 => item.projectiles[0].1.lifetime = 2.,
+                    22 => item.id = 0xa66,
+                    _ => unreachable!(),
+                }
+                reject(&c, &room, fire(&room, 1, 1));
+                c.objects.insert(kind, original.clone());
+            }
+            for id in [0xa1a, 0x600, 0xa2e] {
+                let mut ordinary = c.get(id).unwrap().clone();
+                ordinary.projectiles[0].1.effects = p.effects.clone();
+                ordinary.projectiles[0].1.features = p.features.clone();
+                ordinary.projectiles[0].1.continues = continues;
+                assert!(ordinary.normal_projectile(0).is_err());
+                assert!(ordinary.arena_projectile(0).is_err());
+                assert!(ordinary.quiver_projectile().is_err());
+            }
+            let container = c.objects.remove(&visual).unwrap();
+            reject(&c, &room, fire(&room, 1, 1));
+            c.objects.insert(visual, container);
+        }
+    }
+}
+
+#[test]
+fn quiver_runtime_paralyzed_whole_entry_step_chase_return_wander_clocks_and_resume() {
+    let (c, mut base) = setup(false);
+    archer(&mut base, &c, 1, 0xa64);
+    let (x, y) = (base.character(1).x, base.character(1).y);
+    let id = target(&mut base, &c, (x + 2.5, y), 1000);
+    base.shore = Some(ShorePopulation {
+        sites: vec![],
+        actors: BTreeMap::from([(
+            id,
+            ShorePirate {
+                home: (x + 4., y),
+                next_shot: 0.,
+            },
+        )]),
+        next_replenish: 100.,
+    });
+    for returning in [false, true] {
+        for (remaining, dt) in [(0.025, 0.1), (0.1, 0.1), (3., 4.), (3., 0.), (0., 0.1)] {
+            let mut normal = base.clone();
+            if returning {
+                normal.character_mut(1).x = x + 40.;
+            }
+            let mut held = normal.clone();
+            held.enemy_paralysis.insert(id, remaining);
+            let position = (held.entities[&id].x, held.entities[&id].y);
+            let ordinary = normal.advance(dt, &c).unwrap();
+            let events = held.advance(dt, &c).unwrap();
+            assert_eq!(
+                (held.entities[&id].x, held.entities[&id].y),
+                if remaining > 0. {
+                    position
+                } else {
+                    (normal.entities[&id].x, normal.entities[&id].y)
+                }
+            );
+            assert_eq!(held.entities[&id].age, normal.entities[&id].age);
+            assert_eq!(
+                (held.elapsed, held.shot_clock, held.next_tick),
+                (normal.elapsed, normal.shot_clock, normal.next_tick)
+            );
+            assert_eq!(
+                held.shore.as_ref().unwrap().actors[&id].next_shot,
+                normal.shore.as_ref().unwrap().actors[&id].next_shot
+            );
+            assert_eq!(
+                held.shore.as_ref().unwrap().next_replenish,
+                normal.shore.as_ref().unwrap().next_replenish
+            );
+            assert_eq!(
+                ordinary.iter().filter(|p| p.id == 8).count(),
+                events.iter().filter(|p| p.id == 8).count()
+            );
+            assert_eq!(
+                held.enemy_paralysis.get(&id).copied(),
+                (remaining > dt as f32).then_some((remaining - dt as f32).max(0.))
+            );
+            if remaining > 0. && remaining <= dt as f32 {
+                held.advance(0.1, &c).unwrap();
+                assert!(
+                    distance(
+                        position.0,
+                        position.1,
+                        held.entities[&id].x,
+                        held.entities[&id].y
+                    ) > 0.
+                );
+            }
+        }
+    }
+    // At home and at the chase stop radius there is no normalization of a zero vector.
+    for stop in [false, true] {
+        let mut room = base.clone();
+        if stop {
+            room.entities.get_mut(&id).unwrap().x = x;
+        } else {
+            room.character_mut(1).x = x + 40.;
+            room.entities.get_mut(&id).unwrap().x = x + 4.;
+        }
+        room.enemy_paralysis.insert(id, 3.);
+        let position = (room.entities[&id].x, room.entities[&id].y);
+        room.advance(0., &c).unwrap();
+        room.advance(0.1, &c).unwrap();
+        assert_eq!((room.entities[&id].x, room.entities[&id].y), position);
+    }
+    base.shore = None;
+    base.entities.get_mut(&id).unwrap().kind = 0x801;
+    let home = target(&mut base, &c, (x + 2.5, y), 5);
+    base.entities.get_mut(&home).unwrap().kind = 0x800;
+    let mut normal = base.clone();
+    base.enemy_paralysis.insert(id, 0.1);
+    let position = (base.entities[&id].x, base.entities[&id].y);
+    base.advance(0.1, &c).unwrap();
+    normal.advance(0.1, &c).unwrap();
+    assert_eq!((base.entities[&id].x, base.entities[&id].y), position);
+    assert_ne!((normal.entities[&id].x, normal.entities[&id].y), position);
+    base.advance(0.1, &c).unwrap();
+    assert_ne!((base.entities[&id].x, base.entities[&id].y), position);
+}
+
+#[test]
+fn quiver_runtime_paid_paralyzed_next_advance_independent_slow_overwrite_projection_expiry_cleanup()
+{
+    for kind in [0xa64, 0xa65] {
+        let (c, mut room) = setup(false);
+        archer(&mut room, &c, 1, kind);
+        let (x, y) = (room.character(1).x, room.character(1).y);
+        let id = target(&mut room, &c, (x + 2.5, y), 1000);
+        room.shore = Some(ShorePopulation {
+            sites: vec![],
+            actors: BTreeMap::from([(
+                id,
+                ShorePirate {
+                    home: (x + 4., y),
+                    next_shot: 0.,
+                },
+            )]),
+            next_replenish: 100.,
+        });
+        room.enemy_slows.insert(id, 4.);
+        let input = fire(&room, 1, 96);
+        room.handle(1, input, &c).unwrap();
+        let events = room.advance(0.2, &c).unwrap();
+        assert_eq!(hit_targets(&events), [id]);
+        assert!(
+            room.entities[&id].x < x + 2.5,
+            "hit must not freeze the preceding movement"
+        );
+        assert_eq!(room.enemy_paralysis[&id], 3.);
+        assert_eq!(room.enemy_slows[&id], 3.8);
+        assert_eq!(
+            room.entity_wire_stats(&room.entities[&id], &c).unwrap()[&29],
+            8200
+        );
+        let mut wire = Reader::new(&events.iter().find(|p| p.id == 9).unwrap().body);
+        assert_eq!(
+            (wire.i32().unwrap(), wire.u8().unwrap(), wire.u8().unwrap()),
+            (id, 14, 3)
+        );
+        wire.i16().unwrap();
+        assert_eq!(
+            (wire.u8().unwrap(), wire.i32().unwrap()),
+            (if kind == 0xa65 { 0 } else { 96 }, 1)
+        );
+        wire.done().unwrap();
+        assert_eq!(room.character(1).stats[&25], 0);
+        room.bullets.clear();
+        let position = (room.entities[&id].x, room.entities[&id].y);
+        room.advance(3., &c).unwrap();
+        assert_eq!((room.entities[&id].x, room.entities[&id].y), position);
+        assert!(!room.enemy_paralysis.contains_key(&id));
+        assert!((room.enemy_slows[&id] - 0.8).abs() < 0.000001);
+        assert_eq!(
+            room.entity_wire_stats(&room.entities[&id], &c).unwrap()[&29],
+            8
+        );
+        room.advance(0.1, &c).unwrap();
+        assert!(
+            (distance(
+                position.0,
+                position.1,
+                room.entities[&id].x,
+                room.entities[&id].y
+            ) - 0.3145)
+                .abs()
+                < 0.00002
+        );
+        room.enemy_paralysis.insert(id, 10.);
+        room.character_mut(1).stats.insert(4, 100);
+        room.character_mut(1).resources_carry = Some(ResourceCarry::ZERO);
+        room.players.get_mut(&1).unwrap().quiver_ack = None;
+        let input = fire(&room, 1, 1);
+        room.handle(1, input, &c).unwrap();
+        room.advance(0.1, &c).unwrap();
+        assert_eq!(
+            room.enemy_paralysis[&id], 3.,
+            "reapplication shortens a longer remainder"
+        );
+        room.enemy_slows.insert(id, 0.025);
+        room.advance(0.1, &c).unwrap();
+        assert!(!room.enemy_slows.contains_key(&id));
+        assert_eq!(
+            room.entity_wire_stats(&room.entities[&id], &c).unwrap()[&29],
+            8192
+        );
+        room.bullets.clear();
+        room.enemy_paralysis.insert(id, 0.125);
+        let events = room.advance(0.125, &c).unwrap();
+        assert!(!room.enemy_paralysis.contains_key(&id));
+        assert_eq!(
+            stats(&room.publication(1, &events, &c).unwrap(), 13, id)[&29],
+            0
+        );
+        room.enemy_paralysis.insert(id, 3.);
+        room.entities.remove(&id);
+        room.advance(0., &c).unwrap();
+        assert!(!room.enemy_paralysis.contains_key(&id));
+        let replacement = target(&mut room, &c, (x + 2.5, y), 1000);
+        assert_ne!(id, replacement);
+        assert_eq!(
+            room.entity_wire_stats(&room.entities[&replacement], &c)
+                .unwrap()[&29],
+            0
+        );
+    }
+}
+
+pub(crate) fn golden_contact_fixture(room: &mut Room, c: &Content, owner: i32) -> [i32; 2] {
+    room.shore = None;
+    room.entities.clear();
+    let (x, y) = (room.character(owner).x, room.character(owner).y);
+    [
+        target(room, c, (x + 1., y), 1000),
+        target(room, c, (x + 5., y), 1000),
+    ]
+}
+pub(crate) fn golden_contact_state(
+    room: &Room,
+    targets: [i32; 2],
+) -> ([i32; 2], [Option<f32>; 2], BTreeSet<i32>) {
+    (
+        targets.map(|id| room.entities[&id].stats[&1]),
+        targets.map(|id| room.enemy_paralysis.get(&id).copied()),
+        room.bullets[0].victims.clone(),
+    )
+}
+
+#[test]
+fn quiver_runtime_paid_slow_and_paralyzed_refresh_independently_without_stacking_or_pausing() {
+    for remaining in [0.125, 10.] {
+        let (c, mut room) = setup(false);
+        archer(&mut room, &c, 1, 0xa64);
+        archer(&mut room, &c, 2, 0xa61);
+        room.shore = None;
+        let (x, y) = (room.character(1).x, room.character(1).y);
+        let id = target(&mut room, &c, (x + 1., y), 1000);
+        room.enemy_paralysis.insert(id, remaining);
+        room.enemy_slows.insert(id, 10.);
+        let input = fire(&room, 1, 96);
+        room.handle(1, input, &c).unwrap();
+        assert_eq!(hit_targets(&room.advance(0.1, &c).unwrap()), [id]);
+        assert_eq!(room.enemy_paralysis[&id], 3.);
+        assert_eq!(room.enemy_slows[&id], 9.9);
+        let input = fire(&room, 2, 95);
+        room.handle(2, input, &c).unwrap();
+        assert_eq!(hit_targets(&room.advance(0.1, &c).unwrap()), [id]);
+        assert_eq!(room.enemy_paralysis[&id], 2.9);
+        assert_eq!(room.enemy_slows[&id], 3.);
+        assert_eq!(
+            room.entity_wire_stats(&room.entities[&id], &c).unwrap()[&29],
+            8200
+        );
+        for owner in [1, 2] {
+            assert_eq!(room.character(owner).stats[&25], 0);
+        }
+        assert!(!room.entities[&id].stats.contains_key(&25));
+    }
+}
+
+#[test]
+fn quiver_runtime_paralyzed_static_slide_eligibility_and_replenishment_do_not_inherit_timers() {
+    let (c, template) = setup(false);
+    let mut room = Room::from_map(template.map.unwrap(), &c, 1_000_000).unwrap();
+    archer(&mut room, &c, 1, 0xa64);
+    let old: Vec<_> = room
+        .shore
+        .as_ref()
+        .unwrap()
+        .actors
+        .keys()
+        .copied()
+        .collect();
+    for id in &old {
+        room.enemy_paralysis.insert(*id, 30.);
+        room.enemy_slows.insert(*id, 30.);
+        room.entities.remove(id);
+    }
+    room.advance(10., &c).unwrap();
+    assert!(room.enemy_paralysis.is_empty() && room.enemy_slows.is_empty());
+    assert_eq!(room.shore.as_ref().unwrap().actors.len(), 4);
+    assert_eq!(room.shore.as_ref().unwrap().next_replenish, 20.);
+    for id in room.shore.as_ref().unwrap().actors.keys() {
+        assert!(!old.contains(id));
+        assert_eq!(
+            room.entity_wire_stats(&room.entities[id], &c).unwrap()[&29],
+            0
+        );
+    }
+    let id = *room.shore.as_ref().unwrap().actors.keys().next().unwrap();
+    room.entities
+        .retain(|&key, e| e.provenance != Provenance::Population || key == id);
+    room.shore
+        .as_mut()
+        .unwrap()
+        .actors
+        .retain(|&key, _| key == id);
+    let map = room.map.as_ref().unwrap();
+    let (from, goal) = map
+        .objects()
+        .iter()
+        .find_map(|p| {
+            let (x, y) = p.position();
+            let from = (x + 1., y - 1.);
+            let goal = (from.0 - 3., from.1 + 8.);
+            let d = distance(from.0, from.1, goal.0, goal.1);
+            let to = (
+                from.0 + (goal.0 - from.0) / d * 6.29,
+                from.1 + (goal.1 - from.1) / d * 6.29,
+            );
+            (map.can_move(from, from)
+                && map.walkable(goal.0 as i32, goal.1 as i32)
+                && !map.can_move(from, to)
+                && map.can_move(from, (from.0, to.1)))
+            .then_some((from, goal))
+        })
+        .expect("real static blocker admitting axis slide");
+    (
+        room.entities.get_mut(&id).unwrap().x,
+        room.entities.get_mut(&id).unwrap().y,
+    ) = from;
+    room.shore
+        .as_mut()
+        .unwrap()
+        .actors
+        .get_mut(&id)
+        .unwrap()
+        .home = from;
+    (room.character_mut(1).x, room.character_mut(1).y) = goal;
+    let mut normal = room.clone();
+    normal.advance(1., &c).unwrap();
+    assert_ne!((normal.entities[&id].x, normal.entities[&id].y), from);
+    room.enemy_paralysis.insert(id, 1.);
+    room.advance(1., &c).unwrap();
+    assert_eq!((room.entities[&id].x, room.entities[&id].y), from);
+    assert!(!room.enemy_paralysis.contains_key(&id));
+    room.advance(1., &c).unwrap();
+    assert_eq!(
+        (room.entities[&id].x, room.entities[&id].y),
+        (normal.entities[&id].x, normal.entities[&id].y)
+    );
 }

@@ -262,9 +262,15 @@ impl Object {
         Ok(projectile)
     }
     pub fn quiver_projectile(&self) -> Result<&Projectile> {
+        let (dex, condition, visual, continues) = match self.id {
+            0xa61 | 0xa62 => (0, Condition::Slowed, "Red Arrow", false),
+            0xa63 => (2, Condition::Slowed, "Green Arrow", true),
+            0xa64 => (3, Condition::Paralyzed, "Blue Arrow", false),
+            0xa65 => (5, Condition::Paralyzed, "Gold Arrow", true),
+            _ => anyhow::bail!("unsupported normal quiver shape"),
+        };
         ensure!(
-            matches!(self.id, 0xa61..=0xa63)
-                && self.class == "Equipment"
+            self.class == "Equipment"
                 && self.slot_type == Some(15)
                 && !self.consumable
                 && self.activations.len() == 1
@@ -272,30 +278,28 @@ impl Object {
                 && self.num_projectiles == 1
                 && self.rate_of_fire.is_none()
                 && self.arc_gap_radians == std::f32::consts::PI / 16.
-                && (if self.id == 0xa63 {
-                    self.bonuses == [(28, 2)]
-                } else {
+                && (if dex == 0 {
                     self.bonuses.is_empty()
+                } else {
+                    self.bonuses == [(28, dex)]
                 })
                 && self.projectiles.len() == 1,
             "unsupported normal quiver shape"
         );
         let projectile = self.unique_projectile(0)?;
-        let slow = [ConditionEffect {
-            condition: Condition::Slowed,
+        let effects = [ConditionEffect {
+            condition,
             duration_seconds: 3.,
         }];
         ensure!(
-            self.effects == slow
-                && projectile.effects == slow
-                && (if self.id == 0xa63 {
+            self.effects == effects
+                && projectile.effects == effects
+                && projectile.continues == continues
+                && projectile.visual == visual
+                && (if continues {
                     projectile.features == ["ConditionEffect", "Continues"]
-                        && projectile.continues
-                        && projectile.visual == "Green Arrow"
                 } else {
                     projectile.features == ["ConditionEffect"]
-                        && !projectile.continues
-                        && projectile.visual == "Red Arrow"
                 })
                 && !projectile.wavy
                 && projectile.amplitude == 0.
