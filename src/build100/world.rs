@@ -504,6 +504,7 @@ impl Flight {
 }
 #[derive(Clone)]
 struct Bullet {
+    victims: BTreeSet<i32>,
     flight: Flight,
     owner: i32,
     id: u8,
@@ -668,6 +669,7 @@ fn normal_npc_shot(
         rng.gen_range(0.0..1.0),
     )?;
     let b = Bullet {
+        victims: BTreeSet::new(),
         flight: Flight::Normal {
             projectile: proj.clone(),
             angle: f64::from(angle),
@@ -1220,6 +1222,7 @@ impl Room {
             self.character_mut(players[0]).stats.insert(1, 5);
             for id in 0..2 {
                 self.bullets.push(Bullet {
+                    victims: BTreeSet::new(),
                     flight: Flight::Arena,
                     owner: enemy_id,
                     id,
@@ -1238,6 +1241,7 @@ impl Room {
         }
         for &owner in &players {
             self.bullets.push(Bullet {
+                victims: BTreeSet::new(),
                 flight: Flight::Arena,
                 owner,
                 id: 255,
@@ -1787,6 +1791,7 @@ impl Room {
                 rng.gen_range(0.0..1.0),
             )?;
             let b = Bullet {
+                victims: BTreeSet::new(),
                 flight: Flight::Normal {
                     projectile: proj.clone(),
                     angle: f64::from(angle),
@@ -2048,8 +2053,7 @@ impl Room {
                 let weapon = content.get(kind)?;
                 if quiver {
                     ensure!(
-                        sub == 10
-                            && content.named("Red Arrow")?.id == i16::from(sub)
+                        content.named(&weapon.quiver_projectile()?.visual)?.id == i16::from(sub)
                             && angle.abs() <= std::f32::consts::PI,
                         "invalid native quiver visual/normalized angle"
                     );
@@ -2098,6 +2102,7 @@ impl Room {
                 let damage =
                     super::rules::attack_damage(self.rng.gen_range(proj.min..=proj.max), attack)?;
                 self.bullets.push(Bullet {
+                    victims: BTreeSet::new(),
                     flight: Flight::Arena,
                     owner,
                     id,
@@ -2343,6 +2348,7 @@ impl Room {
                             let angle = index as f32 * std::f32::consts::TAU / 20.;
                             let damage = self.rng.gen_range(proj.min..=proj.max);
                             let b = Bullet {
+                                victims: BTreeSet::new(),
                                 flight: Flight::Arena,
                                 owner: player,
                                 id,
@@ -2617,6 +2623,7 @@ impl Room {
                     rng.gen_range(0.0..1.0),
                 )?;
                 bullets.push(Bullet {
+                    victims: BTreeSet::new(),
                     flight: Flight::Normal {
                         projectile: projectile.clone(),
                         angle: f64::from(angle),
@@ -2644,6 +2651,7 @@ impl Room {
                 rng.gen_range(0.0..1.0),
             )?;
             bullets.push(Bullet {
+                victims: BTreeSet::new(),
                 flight: Flight::Normal {
                     projectile: projectile.clone(),
                     angle: f64::from(input.angle),
@@ -3173,6 +3181,7 @@ impl Room {
                 let angle = (p.y - e.y).atan2(p.x - e.x);
                 let id = (self.elapsed as u32 % 256) as u8;
                 let b = Bullet {
+                    victims: BTreeSet::new(),
                     flight: Flight::Arena,
                     owner: e.id,
                     id,
@@ -3247,6 +3256,34 @@ impl Room {
                         b.y += offset * b.vx / speed;
                     }
                 }
+            }
+            if let Flight::Normal { projectile, .. } = &b.flight
+                && projectile.continues
+            {
+                let mut contacts = vec![];
+                for e in self.entities.values() {
+                    let def = content.get(e.kind)?;
+                    if def.is_enemy
+                        && def.class == "Character"
+                        && e.stats.get(&1).is_some_and(|hp| *hp > 0)
+                        && !b.victims.contains(&e.id)
+                        && let Some(enter) =
+                            projectile_target_entry(from, (b.x, b.y), (e.x, e.y), 0.65)
+                    {
+                        contacts.push((enter, e.id));
+                    }
+                }
+                contacts.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0)
+                        .expect("finite contact entry")
+                        .then(a.1.cmp(&b.1))
+                });
+                for (_, target) in contacts {
+                    // Reserve before buffered damage: earlier bullets may remove this victim.
+                    b.victims.insert(target);
+                    hits.push((target, b.owner, b.id, b.damage, b.flight.clone()));
+                }
+                continue;
             }
             let target = if self.map.is_some() {
                 let cover = projectile_cover_entry(&self.entities, content, b, from)?;
@@ -3345,7 +3382,8 @@ impl Room {
                             .u8(super::content::Condition::Slowed as u8)
                             .u8(effect.duration_seconds as u8)
                             .i16(damage as i16)
-                            .u8(id)
+                            // Native M8 removes positive owner/bullet before target lookup, even for Continues.
+                            .u8(if matches!(&flight, Flight::Normal { projectile, .. } if projectile.continues) { 0 } else { id })
                             .i32(owner);
                     }));
                 } else {
@@ -3667,6 +3705,7 @@ pub(crate) mod tests {
         r.entities.clear();
         r.next_wave = 999.;
         r.bullets.push(Bullet {
+            victims: BTreeSet::new(),
             flight: Flight::Arena,
             owner: 100,
             id: 1,
@@ -3720,6 +3759,7 @@ pub(crate) mod tests {
     #[test]
     fn historical_contracts_server_shoot_uses_index_zero_not_visual() {
         let bullet = Bullet {
+            victims: BTreeSet::new(),
             flight: Flight::Arena,
             owner: 101,
             id: 7,
@@ -3818,6 +3858,7 @@ pub(crate) mod tests {
         r.character_mut(PLAYER).stats.insert(21, 80);
         r.character_mut(PLAYER).stats.insert(1, 100);
         r.bullets.push(Bullet {
+            victims: BTreeSet::new(),
             flight: Flight::Arena,
             owner: 999,
             id: 2,

@@ -751,6 +751,7 @@ fn weapon_runtime_detach_death_clear_pending_no_attacks_while_dead_and_invisible
     assert!(send(&c, &mut r, 11, 0.0, now).unwrap().is_empty());
     let pos = (r.character(1).x, r.character(1).y);
     r.bullets.push(Bullet {
+        victims: BTreeSet::new(),
         flight: tests::normal_flight(0.1, 1.),
         owner: 999,
         id: 1,

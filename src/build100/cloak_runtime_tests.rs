@@ -619,6 +619,7 @@ fn cloak_runtime_no_invulnerability_or_gun_suppression_death_clears_timers() {
     assert!(hits > 0, "Invisible must still receive fixed-gun damage");
     let mut lethal = invisible.clone();
     lethal.bullets.push(Bullet {
+        victims: BTreeSet::new(),
         flight: tests::normal_flight(0.1, 2.),
         owner: 999,
         id: 1,

@@ -482,6 +482,7 @@ fn spell_runtime_enemy_nested_unscaled_source_and_death_clears_paid_action_not_m
     let mp = room.character(1).stats[&4];
     let pos = (room.character(1).x, room.character(1).y);
     room.bullets.push(Bullet {
+        victims: BTreeSet::new(),
         flight: tests::normal_flight(0.1, 1.),
         owner: id,
         id: 250,

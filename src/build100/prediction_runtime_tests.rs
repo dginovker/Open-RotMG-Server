@@ -125,6 +125,7 @@ pub(crate) fn authority_unchanged(before: &Room, after: &Room) {
         assert_eq!(pending(a), pending(b));
     }
     for (a, b) in before.bullets.iter().zip(&after.bullets) {
+        assert_eq!(a.victims, b.victims);
         assert_eq!(
             (a.amplitude, a.frequency, a.vx, a.vy),
             (b.amplitude, b.frequency, b.vx, b.vy)
@@ -299,6 +300,7 @@ fn prediction_runtime_real_lethal_collision_wins_once_without_reintroduction() {
     let e = r.entities.get_mut(&enemy).unwrap();
     (e.x, e.y) = (origin.0 + 1., origin.1);
     r.bullets.push(Bullet {
+        victims: BTreeSet::new(),
         flight: Flight::Normal {
             projectile: c.get(0xa97).unwrap().normal_projectile(0).unwrap().clone(),
             angle: 0.,

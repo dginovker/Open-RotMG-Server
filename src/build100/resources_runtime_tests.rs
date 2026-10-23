@@ -298,6 +298,7 @@ fn resources_runtime_death_ordering_hp_reset_mp_freeze_and_fixture_isolation() {
     let (c, mut r) = setup();
     r.character_mut(1).stats.insert(1, 1);
     r.bullets.push(Bullet {
+        victims: BTreeSet::new(),
         flight: tests::normal_flight(0.1, 2.),
         owner: 999,
         id: 1,
@@ -320,6 +321,7 @@ fn resources_runtime_death_ordering_hp_reset_mp_freeze_and_fixture_isolation() {
     assert_ne!(r.character(1).resources_carry.unwrap().hp_roundoff, 0.);
     let mut lethal = r.bullets.clone();
     lethal.push(Bullet {
+        victims: BTreeSet::new(),
         flight: tests::normal_flight(0.1, 2.),
         owner: 999,
         id: 2,

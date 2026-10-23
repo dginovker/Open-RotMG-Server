@@ -14,7 +14,10 @@ pub(crate) fn fire(room: &Room, owner: i32, id: u8) -> Packet {
 }
 fn native(owner: i32, id: u8, kind: i16, origin: (f32, f32), angle: f32, claim: i16) -> Packet {
     packet(8, |w| {
-        w.u8(id).i32(owner).u8(10).i16(kind);
+        w.u8(id)
+            .i32(owner)
+            .u8(if kind == 0xa63 { 9 } else { 10 })
+            .i16(kind);
         for value in [origin.0, origin.1, angle] {
             w.0.extend(value.to_be_bytes());
         }
@@ -24,7 +27,7 @@ fn native(owner: i32, id: u8, kind: i16, origin: (f32, f32), angle: f32, claim: 
 #[test]
 fn quiver_runtime_native_paid_shoot8_then_nonpaying_use15_original_repaired() {
     for repaired in [false, true] {
-        for (item, cost, min) in [(0xa61, 60, 50), (0xa62, 80, 70)] {
+        for (item, cost, min) in [(0xa61, 60, 50), (0xa62, 80, 70), (0xa63, 80, 90)] {
             let (c, mut room) = setup(repaired);
             archer(&mut room, &c, 1, item);
             let mut rng = room.rng.clone();
@@ -141,7 +144,7 @@ fn quiver_runtime_exact_tuples_and_contextual_whitelist_reject_compound_deferred
             }
         }
         archer(&mut room, &c, 1, 0xa61);
-        for kind in [0xa63, 0xa64, 0xa65] {
+        for kind in [0xa64, 0xa65] {
             room.character_mut(1).stats.insert(9, kind);
             reject(&c, &room, fire(&room, 1, 1));
         }
@@ -188,70 +191,72 @@ fn quiver_runtime_exact_tuples_and_contextual_whitelist_reject_compound_deferred
 }
 #[test]
 fn quiver_runtime_native_geometry_body_owner_id_visual_and_claim_boundaries() {
-    let (c, mut room) = setup(false);
-    archer(&mut room, &c, 1, 0xa61);
-    let (x, y) = (room.character(1).x, room.character(1).y);
-    for id in [0, 97, 255] {
-        reject(&c, &room, native(1, id, 0xa61, (x, y), 0., 0));
-    }
-    reject(&c, &room, native(2, 1, 0xa61, (x, y), 0., 0));
-    for origin in [
-        (x + 2., y),
-        (x - 2., y),
-        (-0.1, y),
-        (256., y),
-        (x, f32::NAN),
-        (f32::INFINITY, y),
-    ] {
-        reject(&c, &room, native(1, 1, 0xa61, origin, 0., 0));
-    }
-    for angle in [
-        f32::NAN,
-        f32::INFINITY,
-        std::f32::consts::PI.next_up(),
-        -std::f32::consts::PI.next_up(),
-    ] {
-        reject(&c, &room, native(1, 1, 0xa61, (x, y), angle, 0));
-    }
-    let p = fire(&room, 1, 1);
-    assert_eq!(p.body.len(), 22);
-    for len in 0..22 {
-        reject(
-            &c,
-            &room,
-            Packet {
-                id: 8,
-                body: p.body[..len].to_vec(),
-            },
-        );
-    }
-    let mut trailing = fire(&room, 1, 1);
-    trailing.body.push(0);
-    reject(&c, &room, trailing);
-    let mut visual = fire(&room, 1, 1);
-    visual.body[5] = 9;
-    reject(&c, &room, visual);
-    for angle in [std::f32::consts::PI, -std::f32::consts::PI, 0.37] {
-        let mut r = room.clone();
-        let origin = (x + 1.999, y);
-        r.handle(1, native(1, 1, 0xa61, origin, angle, i16::MIN), &c)
-            .unwrap();
-        assert_eq!(r.bullets[0].origin, origin);
-        let Flight::Normal { angle: stored, .. } = r.bullets[0].flight else {
-            panic!("normal")
-        };
-        assert_eq!(stored, f64::from(angle));
-        let mut other = room.clone();
-        other
-            .handle(1, native(1, 1, 0xa61, origin, angle, i16::MAX), &c)
-            .unwrap();
-        assert_eq!(r.bullets[0].damage, other.bullets[0].damage);
+    for item in [0xa61, 0xa63] {
+        let (c, mut room) = setup(false);
+        archer(&mut room, &c, 1, item);
+        let (x, y) = (room.character(1).x, room.character(1).y);
+        for id in [0, 97, 255] {
+            reject(&c, &room, native(1, id, item, (x, y), 0., 0));
+        }
+        reject(&c, &room, native(2, 1, item, (x, y), 0., 0));
+        for origin in [
+            (x + 2., y),
+            (x - 2., y),
+            (-0.1, y),
+            (256., y),
+            (x, f32::NAN),
+            (f32::INFINITY, y),
+        ] {
+            reject(&c, &room, native(1, 1, item, origin, 0., 0));
+        }
+        for angle in [
+            f32::NAN,
+            f32::INFINITY,
+            std::f32::consts::PI.next_up(),
+            -std::f32::consts::PI.next_up(),
+        ] {
+            reject(&c, &room, native(1, 1, item, (x, y), angle, 0));
+        }
+        let p = fire(&room, 1, 1);
+        assert_eq!(p.body.len(), 22);
+        for len in 0..22 {
+            reject(
+                &c,
+                &room,
+                Packet {
+                    id: 8,
+                    body: p.body[..len].to_vec(),
+                },
+            );
+        }
+        let mut trailing = fire(&room, 1, 1);
+        trailing.body.push(0);
+        reject(&c, &room, trailing);
+        let mut visual = fire(&room, 1, 1);
+        visual.body[5] = if item == 0xa63 { 10 } else { 9 };
+        reject(&c, &room, visual);
+        for angle in [std::f32::consts::PI, -std::f32::consts::PI, 0.37] {
+            let mut r = room.clone();
+            let origin = (x + 1.999, y);
+            r.handle(1, native(1, 1, item, origin, angle, i16::MIN), &c)
+                .unwrap();
+            assert_eq!(r.bullets[0].origin, origin);
+            let Flight::Normal { angle: stored, .. } = r.bullets[0].flight else {
+                panic!("normal")
+            };
+            assert_eq!(stored, f64::from(angle));
+            let mut other = room.clone();
+            other
+                .handle(1, native(1, 1, item, origin, angle, i16::MAX), &c)
+                .unwrap();
+            assert_eq!(r.bullets[0].damage, other.bullets[0].damage);
+        }
     }
 }
 #[test]
 fn quiver_runtime_payment_resources_cooldown_conditions_unscaled_and_signed_carry() {
     use crate::content::Condition;
-    for (kind, cost) in [(0xa61, 60), (0xa62, 80)] {
+    for (kind, cost) in [(0xa61, 60), (0xa62, 80), (0xa63, 80)] {
         let (c, mut room) = setup(false);
         archer(&mut room, &c, 1, kind);
         for mp in [cost - 1, cost, cost + 1] {
@@ -441,45 +446,47 @@ fn bow(room: &Room, c: &Content, id: u8) -> Packet {
 }
 #[test]
 fn quiver_runtime_shared_native_ids_wrap_retired_reuse_live_and_reserved_burst_collisions() {
-    let (mut c, mut room) = setup(false);
-    archer(&mut room, &c, 1, 0xa61);
-    let p = bow(&room, &c, 95);
-    room.handle(1, p, &c).unwrap();
-    reject(&c, &room, fire(&room, 1, 95));
-    let p = fire(&room, 1, 96);
-    room.handle(1, p, &c).unwrap();
-    reject(&c, &room, bow(&room, &c, 96));
-    room.handle(1, cast(1, 1, 1, (0., 0.)), &c).unwrap();
-    let p = bow(&room, &c, 1);
-    room.handle(1, p, &c).unwrap();
-    assert_eq!(
-        room.players[&1].weapon.pending.as_ref().unwrap().shots[0].0,
-        1
-    );
-    reject(&c, &room, fire(&room, 1, 1));
-    reject(&c, &room, fire(&room, 1, 2));
-    room.cancel_weapon(1);
-    room.advance(1., &c).unwrap();
-    room.character_mut(1).stats.insert(4, 100);
-    room.character_mut(1).resources_carry = Some(ResourceCarry::ZERO);
-    let p = fire(&room, 1, 96);
-    room.handle(1, p, &c).unwrap();
-    assert_eq!(room.bullets.len(), 1);
-    assert!(room.server_projectile_cursors.is_empty());
-    let (x, y) = (room.character(1).x, room.character(1).y);
-    // A partial multi-arrow weapon cannot be interleaved with a native ability.
-    let mut r = room.clone();
-    r.bullets.clear();
-    r.players.get_mut(&1).unwrap().quiver_ack = None;
-    let kind = r.character(1).stats[&8] as i16;
-    c.objects.get_mut(&kind).unwrap().num_projectiles = 2;
-    let p = bow(&r, &c, 10);
-    r.handle(1, p, &c).unwrap();
-    assert_eq!(
-        r.players[&1].weapon.pending.as_ref().unwrap().shots.len(),
-        1
-    );
-    reject(&c, &r, native(1, 11, 0xa61, (x, y), 0., 0));
+    for item in [0xa61, 0xa63] {
+        let (mut c, mut room) = setup(false);
+        archer(&mut room, &c, 1, item);
+        let p = bow(&room, &c, 95);
+        room.handle(1, p, &c).unwrap();
+        reject(&c, &room, fire(&room, 1, 95));
+        let p = fire(&room, 1, 96);
+        room.handle(1, p, &c).unwrap();
+        reject(&c, &room, bow(&room, &c, 96));
+        room.handle(1, cast(1, 1, 1, (0., 0.)), &c).unwrap();
+        let p = bow(&room, &c, 1);
+        room.handle(1, p, &c).unwrap();
+        assert_eq!(
+            room.players[&1].weapon.pending.as_ref().unwrap().shots[0].0,
+            1
+        );
+        reject(&c, &room, fire(&room, 1, 1));
+        reject(&c, &room, fire(&room, 1, 2));
+        room.cancel_weapon(1);
+        room.advance(1., &c).unwrap();
+        room.character_mut(1).stats.insert(4, 100);
+        room.character_mut(1).resources_carry = Some(ResourceCarry::ZERO);
+        let p = fire(&room, 1, 96);
+        room.handle(1, p, &c).unwrap();
+        assert_eq!(room.bullets.len(), 1);
+        assert!(room.server_projectile_cursors.is_empty());
+        let (x, y) = (room.character(1).x, room.character(1).y);
+        // A partial multi-arrow weapon cannot be interleaved with a native ability.
+        let mut r = room.clone();
+        r.bullets.clear();
+        r.players.get_mut(&1).unwrap().quiver_ack = None;
+        let kind = r.character(1).stats[&8] as i16;
+        c.objects.get_mut(&kind).unwrap().num_projectiles = 2;
+        let p = bow(&r, &c, 10);
+        r.handle(1, p, &c).unwrap();
+        assert_eq!(
+            r.players[&1].weapon.pending.as_ref().unwrap().shots.len(),
+            1
+        );
+        reject(&c, &r, native(1, 11, item, (x, y), 0., 0));
+    }
 }
 
 fn target(room: &mut Room, c: &Content, position: (f32, f32), hp: i32) -> i32 {
@@ -501,7 +508,7 @@ fn target(room: &mut Room, c: &Content, position: (f32, f32), hp: i32) -> i32 {
     );
     id
 }
-fn stats(out: &[Packet], packet_id: u8, id: i32) -> BTreeMap<u8, i32> {
+pub(crate) fn stats(out: &[Packet], packet_id: u8, id: i32) -> BTreeMap<u8, i32> {
     for p in out.iter().filter(|p| p.id == packet_id) {
         let mut r = Reader::new(&p.body);
         let count = if packet_id == 10 {
@@ -717,6 +724,7 @@ fn quiver_runtime_death_clears_receipt_projectile_damage_and_ground() {
     let (x, y) = (base.character(1).x, base.character(1).y);
     let id = target(&mut base, &c, (x, y), 5);
     base.bullets.push(Bullet {
+        victims: BTreeSet::new(),
         flight: tests::normal_flight(1., 1.),
         owner: id,
         id: 1,
@@ -820,4 +828,458 @@ fn quiver_runtime_ground_death_clears_marker_and_predicted_repair_retains_curren
     r.advance(0.5, &c).unwrap();
     assert!(!r.character(1).alive);
     assert_eq!(acknowledgement(&r, 1), None);
+}
+
+#[test]
+fn quiver_runtime_iron_native8_paid_once_and_continuing_two_targets() {
+    for repaired in [false, true] {
+        let (c, mut room) = setup(repaired);
+        archer(&mut room, &c, 1, 0xa63);
+        room.shore = None;
+        let p = room.character(1);
+        let (x, y) = (p.x, p.y);
+        let a = target(&mut room, &c, (x + 1., y), 500);
+        let b = target(&mut room, &c, (x + 2., y), 500);
+        let input = fire(&room, 1, 96);
+        room.handle(1, input, &c)
+            .expect("Iron native8 must be supported");
+        assert_eq!(room.character(1).stats[&4], 20);
+        let paid = room.character(1).clone();
+        room.handle(1, cast(1, 1, 1, (0., 0.)), &c).unwrap();
+        assert_eq!(room.character(1), &paid);
+        let damage = room.bullets[0].damage;
+        let events = room.advance(0.2, &c).unwrap();
+        assert_eq!(room.bullets.len(), 1);
+        assert_eq!(room.bullets[0].victims, BTreeSet::from([a, b]));
+        assert_eq!(room.bullets[0].id, 96);
+        for id in [a, b] {
+            assert_eq!(room.entities[&id].stats[&1], 500 - damage);
+            assert_eq!(room.enemy_slows[&id], 3.);
+        }
+        assert_eq!(events.iter().filter(|p| p.id == 9).count(), 2);
+    }
+}
+
+#[test]
+fn quiver_runtime_continues_damage9_nonretiring_presentation_not_native_acceptance() {
+    let (c, mut room) = setup(false);
+    archer(&mut room, &c, 1, 0xa63);
+    room.shore = None;
+    let p = room.character(1);
+    let position = (p.x + 1., p.y);
+    let victim = target(&mut room, &c, position, 500);
+    let input = fire(&room, 1, 96);
+    room.handle(1, input, &c).unwrap();
+    let damage = room.bullets[0].damage;
+    let events = room.advance(0.1, &c).unwrap();
+    let mut r = Reader::new(&events.iter().find(|p| p.id == 9).unwrap().body);
+    assert_eq!(
+        (r.i32().unwrap(), r.u8().unwrap(), r.u8().unwrap()),
+        (victim, 4, 3)
+    );
+    assert_eq!(r.i16().unwrap(), damage as i16);
+    let (presentation, owner) = (r.u8().unwrap(), r.i32().unwrap());
+    assert!(
+        !(owner >= 0 && presentation > 0),
+        "original M8 removes positive owner/bullet before looking up victim"
+    );
+    assert_eq!((owner, presentation), (1, 0));
+    assert_eq!(room.bullets[0].id, 96);
+}
+
+fn hit_targets(events: &[Packet]) -> Vec<i32> {
+    events
+        .iter()
+        .filter(|p| p.id == 9)
+        .map(|p| Reader::new(&p.body).i32().unwrap())
+        .collect()
+}
+
+#[test]
+fn quiver_runtime_iron_shape_visual_dex_and_noncontinuing_wire_unchanged() {
+    for repaired in [false, true] {
+        let (mut c, mut room) = setup(repaired);
+        archer(&mut room, &c, 1, 0xa63);
+        let iron = c.get(0xa63).unwrap().clone();
+        let projectile = iron.quiver_projectile().unwrap();
+        assert_eq!(
+            (iron.root_damage, iron.mp_cost, &iron.bonuses),
+            (Some((90, 110)), Some(80), &vec![(28, 2)])
+        );
+        assert_eq!(
+            (
+                projectile.min,
+                projectile.max,
+                projectile.speed,
+                projectile.lifetime
+            ),
+            (90, 110, 15., 1.)
+        );
+        assert_eq!(
+            (
+                &*projectile.visual,
+                projectile.continues,
+                &projectile.features
+            ),
+            (
+                "Green Arrow",
+                true,
+                &vec!["ConditionEffect".to_string(), "Continues".to_string()]
+            )
+        );
+        assert_eq!(c.named(&projectile.visual).unwrap().id, 9);
+        assert_eq!(
+            c.get(room.character(1).stats[&8] as i16)
+                .unwrap()
+                .normal_projectile(0)
+                .unwrap()
+                .visual,
+            projectile.visual
+        );
+        assert!(iron.normal_projectile(0).is_err());
+        assert!(iron.arena_projectile(0).is_err());
+        for case in 0..14 {
+            let item = c.objects.get_mut(&0xa63).unwrap();
+            match case {
+                0 => item.bonuses.clear(),
+                1 => item.bonuses.push((28, 2)),
+                2 => item.bonuses[0].1 = 3,
+                3 => item.bonuses[0].0 = 20,
+                4 => item.projectiles[0].1.continues = false,
+                5 => item.projectiles[0].1.features.reverse(),
+                6 => item.projectiles[0].1.features.push("Continues".into()),
+                7 => item.projectiles[0].1.visual = "Red Arrow".into(),
+                8 => {
+                    item.projectiles[0].1.effects[0].condition =
+                        crate::content::Condition::Paralyzed
+                }
+                9 => item.root_damage = Some((89, 110)),
+                10 => item.projectiles[0].1.features.push("Unknown".into()),
+                11 => item.activations.push(item.activations[0].clone()),
+                12 => item.mp_cost = None,
+                13 => item.projectiles.push(item.projectiles[0].clone()),
+                _ => unreachable!(),
+            }
+            reject(&c, &room, fire(&room, 1, 1));
+            c.objects.insert(0xa63, iron.clone());
+        }
+        let green = c.objects.remove(&9).unwrap();
+        reject(&c, &room, fire(&room, 1, 1));
+        c.objects.insert(9, green);
+        let mut wrong_visual = fire(&room, 1, 1);
+        wrong_visual.body[5] = 10;
+        reject(&c, &room, wrong_visual);
+        let base_dex = room.character(1).stats[&28];
+        for _ in 0..3 {
+            let p = room.character(1).clone();
+            let effective = p.equipment_stats(&c).unwrap();
+            assert_eq!(effective.get(28).unwrap(), base_dex + 2);
+            assert_eq!(room.wire_stats(&p, &c).unwrap()[&28], base_dex + 2);
+            assert!(
+                combat::weapon_interval_ms(
+                    c.get(p.stats[&8] as i16).unwrap(),
+                    base_dex + 2,
+                    combat::ConditionMask::default()
+                )
+                .unwrap()
+                    < combat::weapon_interval_ms(
+                        c.get(p.stats[&8] as i16).unwrap(),
+                        base_dex,
+                        combat::ConditionMask::default()
+                    )
+                    .unwrap()
+            );
+            room.detach(1);
+            room.attach(1, p, &c).unwrap();
+            assert_eq!(room.character(1).stats[&28], base_dex);
+        }
+        for item in [0xa61, 0xa62] {
+            let mut r = room.clone();
+            r.shore = None;
+            r.character_mut(1).stats.insert(9, item);
+            let position = (r.character(1).x + 1., r.character(1).y);
+            let victim = target(&mut r, &c, position, 500);
+            let input = fire(&r, 1, 95);
+            r.handle(1, input, &c).unwrap();
+            let damage = r.bullets[0].damage;
+            let events = r.advance(0.1, &c).unwrap();
+            assert!(r.bullets.is_empty());
+            let expected = packet(9, |w| {
+                w.i32(victim).u8(4).u8(3).i16(damage as i16).u8(95).i32(1);
+            });
+            assert_eq!(
+                events.iter().find(|p| p.id == 9).unwrap().body,
+                expected.body
+            );
+        }
+    }
+}
+
+#[test]
+fn quiver_runtime_iron_separate_contacts_reentry_repair_tombstones_replacement_and_later_payment() {
+    let (c, mut room) = setup(false);
+    for id in [1, 2] {
+        archer(&mut room, &c, id, 0xa63);
+    }
+    room.shore = None;
+    let (x, y) = (room.character(1).x, room.character(1).y);
+    let a = target(&mut room, &c, (x + 1., y), 500);
+    let b = target(&mut room, &c, (x + 5., y), 500);
+    for id in [1, 2] {
+        room.publication(id, &[], &c).unwrap();
+    }
+    let input = fire(&room, 1, 96);
+    room.handle(1, input, &c).unwrap();
+    room.handle(1, cast(1, 1, 1, (0., 0.)), &c).unwrap();
+    let damage = room.bullets[0].damage;
+    assert_eq!(hit_targets(&room.advance(0.05, &c).unwrap()), [a]);
+    assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+    for condition in [1, 4, 1] {
+        let before = room.clone();
+        let events = room
+            .handle(1, prediction_runtime_tests::report(a, 1, 96, condition), &c)
+            .unwrap();
+        let out = room.publication(1, &events, &c).unwrap();
+        if condition == 1 {
+            assert_eq!(prediction_runtime_tests::target_packets(&out, a), [11, 10]);
+            assert_eq!(stats(&out, 10, a)[&29], 8);
+        }
+        assert!(room.publication(2, &events, &c).unwrap().is_empty());
+        prediction_runtime_tests::authority_unchanged(&before, &room);
+    }
+    assert!(hit_targets(&room.advance(0.05, &c).unwrap()).is_empty());
+    // A fresh native instance or movement back into overlap never replaces Room identity.
+    room.entities.get_mut(&a).unwrap().x = room.bullets[0].x;
+    assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+    assert_eq!(room.enemy_slows[&a], 2.95);
+    assert_eq!(room.entities[&a].stats[&1], 500 - damage);
+    assert_eq!(hit_targets(&room.advance(0.2, &c).unwrap()), [b]);
+    assert_eq!(room.bullets[0].victims, BTreeSet::from([a, b]));
+    let victims = room.bullets[0].victims.clone();
+    room.character_mut(1).x += 40.;
+    room.publication(1, &[], &c).unwrap();
+    assert!(!room.players[&1].known_objects.contains(&b));
+    room.character_mut(1).x = x;
+    room.publication(1, &[], &c).unwrap();
+    assert_eq!(room.bullets[0].victims, victims);
+    room.entities.remove(&a);
+    let position = (room.bullets[0].x, room.bullets[0].y);
+    let replacement = target(&mut room, &c, position, 500);
+    assert_ne!(replacement, a);
+    assert_eq!(hit_targets(&room.advance(0., &c).unwrap()), [replacement]);
+    assert!(!room.enemy_slows.contains_key(&a));
+    assert_eq!(room.bullets[0].victims, BTreeSet::from([a, b, replacement]));
+    assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+    room.advance(0.7, &c).unwrap();
+    assert!(room.bullets.is_empty());
+    room.character_mut(1).stats.insert(4, 80);
+    let input = fire(&room, 1, 1);
+    room.handle(1, input, &c).unwrap();
+    assert!(room.bullets[0].victims.is_empty());
+    let second_damage = room.bullets[0].damage;
+    assert_eq!(
+        hit_targets(&room.advance(0.3, &c).unwrap()),
+        [replacement, b]
+    );
+    assert_eq!(room.entities[&b].stats[&1], 500 - damage - second_damage);
+    assert_eq!(room.enemy_slows[&b], 3.);
+}
+
+#[test]
+fn quiver_runtime_iron_cover_entry_order_ties_tangency_t0_and_expiry_before_contacts() {
+    let (c, mut base) = setup(false);
+    archer(&mut base, &c, 1, 0xa63);
+    base.shore = None;
+    let (x, y) = (base.character(1).x, base.character(1).y);
+    for cover_offset in [0., 1., 2., 4.] {
+        let mut room = base.clone();
+        let initial = target(&mut room, &c, (x + 0.3, y), 500);
+        let far = target(&mut room, &c, (x + 3., y), 500);
+        let near = target(&mut room, &c, (x + 1., y), 500);
+        let tie = target(&mut room, &c, (x + 1., y), 500);
+        let wall = c
+            .objects
+            .values()
+            .find(|o| o.is_static && o.occupy_square)
+            .unwrap();
+        let id = target(&mut room, &c, (x + cover_offset, y), 500);
+        room.entities.get_mut(&id).unwrap().kind = wall.id;
+        let input = fire(&room, 1, 1);
+        room.handle(1, input, &c).unwrap();
+        assert_eq!(
+            hit_targets(&room.advance(0.25, &c).unwrap()),
+            [initial, near, tie, far]
+        );
+        assert_eq!(room.bullets.len(), 1);
+        assert!(!room.bullets[0].victims.contains(&id));
+    }
+    let mut room = base.clone();
+    let tangent = target(&mut room, &c, (x + 0.5, 0.), 500);
+    let inside = target(&mut room, &c, (x, 0.65), 500);
+    let dead = target(&mut room, &c, (x, 0.65), 0);
+    let input = native(1, 1, 0xa63, (x, 0.65), 0., 0);
+    room.character_mut(1).y = 0.65;
+    room.handle(1, input, &c).unwrap();
+    assert_eq!(hit_targets(&room.advance(0., &c).unwrap()), [inside]);
+    assert!(hit_targets(&room.advance(0.2, &c).unwrap()).is_empty());
+    assert_eq!(room.entities[&tangent].stats[&1], 500);
+    assert!(!room.bullets[0].victims.contains(&dead));
+    for (age, dt, hit) in [
+        (0., 1., false),
+        (0.9, 0.1, false),
+        (0., 1.2, false),
+        (0.5, 0.4, true),
+    ] {
+        let mut room = base.clone();
+        let id = target(&mut room, &c, (x + 2., y), 500);
+        let input = fire(&room, 1, 1);
+        room.handle(1, input, &c).unwrap();
+        room.bullets[0].age = age;
+        let events = room.advance(dt, &c).unwrap();
+        assert_eq!(hit_targets(&events).contains(&id), hit);
+        assert_eq!(room.bullets.is_empty(), !hit);
+        assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+    }
+}
+
+#[test]
+fn quiver_runtime_iron_buffered_dead_skip_keeps_reservation_and_once_rewards() {
+    let (c, mut room) = setup(false);
+    for id in [1, 2] {
+        archer(&mut room, &c, id, 0xa63);
+    }
+    room.shore = None;
+    let (x, y) = (room.character(1).x, room.character(1).y);
+    let dead = target(&mut room, &c, (x + 1., y), 5);
+    let survivor = target(&mut room, &c, (x + 2., y), 500);
+    for owner in [1, 2] {
+        let input = fire(&room, owner, 1);
+        room.handle(owner, input, &c).unwrap();
+    }
+    let mut once = room.clone();
+    once.bullets.pop();
+    once.advance(0.2, &c).unwrap();
+    let total: i32 = room.bullets.iter().map(|b| b.damage).sum();
+    let events = room.advance(0.2, &c).unwrap();
+    assert_eq!(hit_targets(&events), [dead, survivor, survivor]);
+    for bullet in &room.bullets {
+        assert_eq!(bullet.victims, BTreeSet::from([dead, survivor]));
+    }
+    assert!(!room.entities.contains_key(&dead));
+    assert!(!room.enemy_slows.contains_key(&dead));
+    assert_eq!(room.entities[&survivor].stats[&1], 500 - total);
+    for id in [1, 2] {
+        assert_eq!(room.character(id).stats[&6], once.character(id).stats[&6]);
+    }
+    assert_eq!(room.rng.clone().next_u64(), once.rng.clone().next_u64());
+    assert_eq!(room.next_id, once.next_id);
+    assert_eq!(
+        room.entities.values().filter(|e| e.kind == 0x500).count(),
+        once.entities.values().filter(|e| e.kind == 0x500).count()
+    );
+    let xp = room.character(1).stats[&6];
+    assert!(hit_targets(&room.advance(0., &c).unwrap()).is_empty());
+    assert_eq!(room.character(1).stats[&6], xp);
+}
+
+#[test]
+fn quiver_runtime_iron_both_actual_victims_slow_next_step_overwrite_expiry_mask_cleanup() {
+    let (c, mut room) = setup(false);
+    archer(&mut room, &c, 1, 0xa63);
+    room.shore = None;
+    let (x, y) = (room.character(1).x, room.character(1).y);
+    let a = target(&mut room, &c, (x + 3., y), 500);
+    let b = target(&mut room, &c, (x + 5., y), 500);
+    for id in [a, b] {
+        room.enemy_slows.insert(id, 10.);
+    }
+    let input = fire(&room, 1, 1);
+    room.handle(1, input, &c).unwrap();
+    assert_eq!(hit_targets(&room.advance(0.4, &c).unwrap()), [a, b]);
+    room.shore = Some(ShorePopulation {
+        sites: vec![],
+        next_replenish: 100.,
+        actors: [a, b]
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    ShorePirate {
+                        home: (room.entities[&id].x, y),
+                        next_shot: 0.,
+                    },
+                )
+            })
+            .collect(),
+    });
+    let before = room.clone();
+    let mut normal = room.clone();
+    normal.enemy_slows.clear();
+    let ordinary = normal.advance(0.1, &c).unwrap();
+    let slowed = room.advance(0.1, &c).unwrap();
+    for id in [a, b] {
+        let origin = &before.entities[&id];
+        let n = &normal.entities[&id];
+        let s = &room.entities[&id];
+        let d = distance(origin.x, origin.y, n.x, n.y);
+        let ds = distance(origin.x, origin.y, s.x, s.y);
+        assert!((d - 0.629).abs() < 0.00002);
+        assert!((ds - 0.5 * d).abs() < 0.00002);
+        assert_eq!(s.age, n.age);
+        assert_eq!(
+            room.shore.as_ref().unwrap().actors[&id].next_shot,
+            normal.shore.as_ref().unwrap().actors[&id].next_shot
+        );
+        assert_eq!(room.enemy_slows[&id], 2.9);
+        assert_eq!(room.entity_wire_stats(s, &c).unwrap()[&29], 8);
+    }
+    assert_eq!(
+        ordinary.iter().filter(|p| p.id == 8).count(),
+        slowed.iter().filter(|p| p.id == 8).count()
+    );
+    room.advance(2.775, &c).unwrap();
+    assert_eq!(room.enemy_slows[&a], 0.125);
+    room.advance(0.125, &c).unwrap();
+    for id in [a, b] {
+        assert!(!room.enemy_slows.contains_key(&id));
+        assert_eq!(
+            room.entity_wire_stats(&room.entities[&id], &c).unwrap()[&29],
+            0
+        );
+    }
+    assert_eq!(room.character(1).stats[&25], 0);
+    room.entities.remove(&a);
+    room.advance(0., &c).unwrap();
+    let replacement = target(&mut room, &c, (x + 3., y), 500);
+    assert_eq!(
+        room.entity_wire_stats(&room.entities[&replacement], &c)
+            .unwrap()[&29],
+        0
+    );
+}
+
+pub(crate) fn iron_collision_fixture(room: &mut Room, c: &Content, owner: i32) -> [i32; 2] {
+    room.shore = None;
+    room.entities.clear();
+    let (x, y) = (room.character(owner).x, room.character(owner).y);
+    [
+        target(room, c, (x + 1., y), 5),
+        target(room, c, (x + 2., y), 500),
+    ]
+}
+pub(crate) fn assert_iron_collision(room: &Room, targets: [i32; 2]) {
+    assert!(!room.entities.contains_key(&targets[0]));
+    assert!(!room.enemy_slows.contains_key(&targets[0]));
+    assert!(room.entities[&targets[1]].stats[&1] < 500);
+    assert_eq!(room.enemy_slows[&targets[1]], 3.);
+    assert_eq!(room.bullets.len(), 1);
+    assert_eq!(room.bullets[0].victims, BTreeSet::from(targets));
+}
+pub(crate) fn assert_iron_reward_candidate(before: &Room, candidate: &Room) {
+    assert_ne!(
+        before.rng.clone().next_u64(),
+        candidate.rng.clone().next_u64()
+    );
+    assert!(candidate.next_id > before.next_id);
+    assert!(candidate.entities.values().any(|e| e.kind == 0x500));
 }
