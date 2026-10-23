@@ -63,6 +63,7 @@ fn prediction_runtime_known_living_enemy_self_only_drop_then_make() {
 
 pub(crate) fn authority_unchanged(before: &Room, after: &Room) {
     assert_eq!(before.enemy_slows, after.enemy_slows);
+    assert_eq!(before.enemy_paralysis, after.enemy_paralysis);
     assert_eq!(
         shore_runtime_tests::snapshot(before),
         shore_runtime_tests::snapshot(after)

@@ -599,6 +599,7 @@ pub struct Room {
     bullets: Vec<Bullet>,
     server_projectile_cursors: BTreeMap<i32, u8>,
     enemy_slows: BTreeMap<i32, f32>,
+    enemy_paralysis: BTreeMap<i32, f32>,
     shore: Option<ShorePopulation>,
     rng: StdRng,
     next_id: i32,
@@ -611,6 +612,15 @@ pub struct Room {
     next_tick: f32,
     portal: i32,
     destination: i32,
+}
+fn enemy_movement_factor(slow: Option<&f32>, paralysis: Option<&f32>) -> f32 {
+    if paralysis.is_some_and(|t| *t > 0.) {
+        0.
+    } else if slow.is_some_and(|t| *t > 0.) {
+        0.5
+    } else {
+        1.
+    }
 }
 // Server retirement does not prove a client's object key is retired; keep cycling per owner.
 fn server_projectile_ids(
@@ -1270,6 +1280,7 @@ impl Room {
             bullets: vec![],
             server_projectile_cursors: BTreeMap::new(),
             enemy_slows: BTreeMap::new(),
+            enemy_paralysis: BTreeMap::new(),
             shore: None,
             rng: StdRng::seed_from_u64(seed),
             next_id: base + 100,
@@ -1480,15 +1491,15 @@ impl Room {
         if def.is_enemy && def.class == "Character" {
             stats.insert(
                 29,
-                if self
-                    .enemy_slows
-                    .get(&e.id)
-                    .is_some_and(|remaining| *remaining > 0.)
-                {
+                (if self.enemy_slows.get(&e.id).is_some_and(|t| *t > 0.) {
                     8
                 } else {
                     0
-                },
+                }) | (if self.enemy_paralysis.get(&e.id).is_some_and(|t| *t > 0.) {
+                    8192
+                } else {
+                    0
+                }),
             );
         }
         Ok(stats)
@@ -3021,15 +3032,8 @@ impl Room {
             let from = (e.x, e.y);
             let d = distance(from.0, from.1, goal.0, goal.1);
             if d > stop {
-                let factor = if self
-                    .enemy_slows
-                    .get(&id)
-                    .is_some_and(|remaining| *remaining > 0.)
-                {
-                    0.5
-                } else {
-                    1.
-                };
+                let factor =
+                    enemy_movement_factor(self.enemy_slows.get(&id), self.enemy_paralysis.get(&id));
                 let step = (speed * factor * dt).min(d - stop);
                 let to = (
                     from.0 + (goal.0 - from.0) / d * step,
@@ -3109,15 +3113,10 @@ impl Room {
             if let Some(map) = &self.map {
                 if e.kind == 0x801 {
                     let angle = (e.id as f32 + self.elapsed * 0.4).sin() * std::f32::consts::TAU;
-                    let factor = if self
-                        .enemy_slows
-                        .get(&e.id)
-                        .is_some_and(|remaining| *remaining > 0.)
-                    {
-                        0.5
-                    } else {
-                        1.
-                    };
+                    let factor = enemy_movement_factor(
+                        self.enemy_slows.get(&e.id),
+                        self.enemy_paralysis.get(&e.id),
+                    );
                     let to = (
                         e.x + angle.cos() * dt * 0.4 * factor,
                         e.y + angle.sin() * dt * 0.4 * factor,
@@ -3201,11 +3200,13 @@ impl Room {
             }
         }
         self.advance_shore(dt, content, &mut out)?;
-        // Positive-on-entry slows the whole AI step; hits below affect the next advance.
-        self.enemy_slows.retain(|id, remaining| {
-            *remaining = (*remaining - dt).max(0.);
-            *remaining > 0. && self.entities.contains_key(id)
-        });
+        // Positive-on-entry affects the whole movement step; hits below affect the next advance.
+        for timers in [&mut self.enemy_slows, &mut self.enemy_paralysis] {
+            timers.retain(|id, remaining| {
+                *remaining = (*remaining - dt).max(0.);
+                *remaining > 0. && self.entities.contains_key(id)
+            });
+        }
         let mut hits = vec![];
         for b in &mut self.bullets {
             let from = (b.x, b.y);
@@ -3368,18 +3369,26 @@ impl Room {
                     flight.damage(raw, *e.stats.get(&21).context("enemy Defense missing")?)?;
                 let hp = e.stats.get_mut(&1).context("enemy HP missing")?;
                 *hp = hp.checked_sub(damage).context("enemy damage HP overflow")?;
-                let slow = match &flight {
-                    Flight::Normal { projectile, .. } => projectile
-                        .effects
-                        .iter()
-                        .find(|effect| effect.condition == super::content::Condition::Slowed),
+                let effect = match &flight {
+                    Flight::Normal { projectile, .. } => projectile.effects.iter().find(|effect| {
+                        matches!(
+                            effect.condition,
+                            super::content::Condition::Slowed
+                                | super::content::Condition::Paralyzed
+                        )
+                    }),
                     Flight::Arena => None,
                 };
-                if let Some(effect) = slow {
-                    self.enemy_slows.insert(target, effect.duration_seconds);
+                if let Some(effect) = effect {
+                    let timers = if effect.condition == super::content::Condition::Paralyzed {
+                        &mut self.enemy_paralysis
+                    } else {
+                        &mut self.enemy_slows
+                    };
+                    timers.insert(target, effect.duration_seconds);
                     out.push(packet(9, |w| {
                         w.i32(target)
-                            .u8(super::content::Condition::Slowed as u8)
+                            .u8(effect.condition as u8)
                             .u8(effect.duration_seconds as u8)
                             .i16(damage as i16)
                             // Native M8 removes positive owner/bullet before target lookup, even for Continues.
@@ -3391,6 +3400,7 @@ impl Room {
                 }
                 if e.stats[&1] <= 0 {
                     self.enemy_slows.remove(&target);
+                    self.enemy_paralysis.remove(&target);
                     let e = self.entities.remove(&target).expect("enemy present");
                     out.push(drop_object(target));
                     if self.map.is_some() {
@@ -3471,8 +3481,9 @@ impl Room {
             self.teaching_objects(content)?;
             self.hazards(&mut out)?;
         }
-        self.enemy_slows
-            .retain(|id, _| self.entities.contains_key(id));
+        for timers in [&mut self.enemy_slows, &mut self.enemy_paralysis] {
+            timers.retain(|id, _| self.entities.contains_key(id));
+        }
         self.replenish_shore(content)?;
         self.server_projectile_cursors.retain(|owner, _| {
             self.players.get(owner).is_some_and(|a| a.character.alive)
