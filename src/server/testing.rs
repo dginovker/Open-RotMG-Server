@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+mod protection_tests;
+
 const MAX_REQUEST_BYTES: usize = 8192;
 const MAX_MUTATIONS: usize = 1024;
 
@@ -186,6 +189,17 @@ enum Cheat {
         amount: i32,
         duration_ms: u64,
     },
+    Protection {
+        condition: Protection,
+        duration_ms: u64,
+    },
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Protection {
+    Invincible,
+    Stasis,
+    Invulnerable,
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -1001,6 +1015,13 @@ async fn execute(a: &App, t: &Testing, id: &str, command: Command) -> Result<Val
             let mut ch=a.world.for_player(player).call(move |w| {let p=w.players.get(&player).context("player missing")?;ensure!(p.character.alive&&!p.pending&&!p.progress_started&&!p.death_pending&&!p.departing,"actor has pending gameplay or persistence");Ok(p.character.clone())}).await?;
             match change {
                 Cheat::StatModifier{index,amount,duration_ms}=>{a.world.for_player(player).call(move |w| w.prepare_stat_modifier(player,index,amount,duration_ms)).await?;},
+                Cheat::Protection{condition,duration_ms}=>{a.world.for_player(player).call(move |w| {
+                    ensure!((1..=60000).contains(&duration_ms),super::lifecycle::controller("prepared protection duration must be 1–60000ms"));
+                    let p=w.players.get(&player).context("player missing")?;
+                    ensure!(!crate::condition::protected(p.conditions(w.now)),super::lifecycle::controller("player protection already active"));
+                    let index=match condition {Protection::Invincible=>crate::condition::INVINCIBLE,Protection::Stasis=>crate::condition::STASIS,Protection::Invulnerable=>crate::condition::INVULNERABLE};
+                    w.apply_condition(player,index,duration_ms)?;w.updates(player,true)
+                }).await?;},
                 Cheat::Teleport{position}=>{a.world.for_player(player).call(move |w| {ensure!(position.x.is_finite()&&position.y.is_finite()&&w.walkable(position),"teleport position invalid");let p=w.players.get_mut(&player).context("player missing")?;ensure!(p.controller!=crate::world::Controller::Human,"native teleport requires a verified client correction, not a server-only edit");p.pos=position;p.bot_goal=None;w.updates(player,true)}).await?;},
                 change=>{
                     if let Cheat::Stats{values}=&change {let values=*values;a.world.for_player(player).call(move |w| w.validate_prepared_base_stats(player,values)).await?;}
@@ -1008,7 +1029,7 @@ async fn execute(a: &App, t: &Testing, id: &str, command: Command) -> Result<Val
                     match change {
                         Cheat::Stats{values}=>{ch.base=values;let stats=ch.effective(&a.content)?;ch.hp=ch.hp.min(stats[0]);ch.mp=ch.mp.min(stats[1]);},
                         Cheat::Item{slot,item}=>{ensure!(slot<12,"invalid item slot");if item!=-1{a.content.get(u16::try_from(item)?)?;}ch.items[slot]=item;ch.effective(&a.content)?;ch.revision=a.store.exchange(vec![InventoryWrite{id:ch.id,account:ch.account,revision:ch.revision,items:ch.items.clone()}],Vec::new()).await?[0];},
-                        Cheat::Teleport{..}|Cheat::StatModifier{..}=>unreachable!(),
+                        Cheat::Teleport{..}|Cheat::StatModifier{..}|Cheat::Protection{..}=>unreachable!(),
                     }
                     let stats = ch.effective(&a.content)?;
                     ch.hp = ch.hp.min(stats[0]); ch.mp = ch.mp.min(stats[1]);

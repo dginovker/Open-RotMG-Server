@@ -236,6 +236,9 @@ impl World {
         }
         tracing::debug!(
             player = id,
+            owner = b.owner,
+            bullet = b.id,
+            source_kind = b.source_kind,
             damage,
             hp = p.character.hp,
             echo,
