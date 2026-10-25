@@ -27,7 +27,7 @@ pub(super) fn attack_cooldown(
     let rate = if p.conditions(now) & crate::condition::bit(crate::condition::DAZED) != 0 {
         0.0015
     } else {
-        let base = 0.0015 + (0.008 - 0.0015) * p.character.effective(content)?[5] as f64 / 75.;
+        let base = 0.0015 + (0.008 - 0.0015) * p.effective(content, now)?[5] as f64 / 75.;
         base * if p.conditions(now) & crate::condition::bit(crate::condition::BERSERK) != 0 {
             1.5
         } else {
@@ -45,7 +45,7 @@ pub(super) fn goto(p: &mut Player, own: bool, body: Vec<u8>) {
             character = p.character.id,
             "GOTO acknowledgement backlog exceeded"
         );
-        output.lost.send_replace(true);
+        lose(&output.lost, "goto_ack_backlog");
         return;
     }
     // ACK has no object ID, so other players' GOTOs must share the same FIFO.
@@ -54,12 +54,40 @@ pub(super) fn goto(p: &mut Player, own: bool, body: Vec<u8>) {
 }
 
 impl Player {
+    pub(super) fn advertised_weapon(&self, kind: u16) -> bool {
+        self.weapon_ticks
+            .iter()
+            .any(|(_, k, _)| *k == i32::from(kind))
+    }
+    // NEW_TICK ACK precedes applying DEX, so in-flight cadence needs ACK-bounded views: https://github.com/moistosaurus/realm-cli/blob/a13c855dc5e09ee301fd0a66fcd303cfb5dff74e/src/kabam/rotmg/messaging/impl/GameServerConnection.as#L1182-L1194
+    pub(super) fn advertised_dex(&self, current: i32) -> i32 {
+        self.weapon_ticks
+            .iter()
+            .fold(current, |dex, (_, _, past)| dex.max(*past))
+    }
+    pub(super) fn remember_weapon_tick(&mut self, dex: i32) {
+        if self.controller != Controller::Human {
+            return;
+        }
+        if self.weapon_ticks.len() == ACK_LIMIT {
+            tracing::error!(
+                character = self.character.id,
+                "tick acknowledgement backlog exceeded"
+            );
+            if let Some(output) = &self.tx {
+                lose(&output.lost, "tick_ack_backlog");
+            }
+            return;
+        }
+        self.weapon_ticks
+            .push_back((self.tick, self.character.items[0], dex));
+    }
     pub(super) fn correcting(&self) -> Result<bool> {
         ensure!(self.active(), "inactive player cannot reconcile position");
         if let Some((_, sent)) = self.goto_acks.iter().find(|(own, _)| *own) {
             ensure!(
                 sent.elapsed() <= ACK_TIMEOUT,
-                "GOTO acknowledgement timed out"
+                crate::server::lifecycle::protocol("GOTO acknowledgement timed out")
             );
             return Ok(true);
         }
@@ -79,20 +107,126 @@ impl Player {
 }
 
 impl World {
+    fn predicted_death_target(&self, id: i32, target: i32) -> Option<&Entity> {
+        let p = self.players.get(&id)?;
+        if p.controller != Controller::Human || !p.active() || !p.known.contains(&target) {
+            return None;
+        }
+        self.entities
+            .get(&target)
+            .filter(|e| e.hp > 0 && self.content.objects[&e.kind].enemy)
+    }
+
+    pub fn native_predicted_enemy_death(&mut self, id: i32, bullet: u8, target: i32) -> Result<()> {
+        self.players
+            .get(&id)
+            .context("enemy death report player missing")?;
+        if self.predicted_death_target(id, target).is_some() {
+            let bullets = &self.bullets;
+            self.players
+                .get_mut(&id)
+                .unwrap()
+                .predicted_deaths
+                .entry(target)
+                .or_insert_with(|| {
+                    let born = bullets
+                        .iter()
+                        .find(|b| b.friendly && b.owner == id && b.id == bullet)
+                        .map(|b| b.born);
+                    (bullet, born)
+                });
+        }
+        Ok(())
+    }
+
+    pub(super) fn reconcile_enemy_deaths(&mut self) {
+        let pending: Vec<_> = self
+            .players
+            .iter()
+            .flat_map(|(&id, p)| {
+                p.predicted_deaths
+                    .iter()
+                    .map(move |(&target, &(bullet, born))| (id, target, bullet, born))
+            })
+            .collect();
+        for (id, target, bullet, born) in pending {
+            let alive = self.predicted_death_target(id, target).is_some();
+            if alive
+                && self.bullets.iter().any(|b| {
+                    b.friendly
+                        && b.owner == id
+                        && b.id == bullet
+                        && Some(b.born) == born
+                        && !b.hit.contains(&target)
+                })
+            {
+                continue;
+            }
+            self.players
+                .get_mut(&id)
+                .unwrap()
+                .predicted_deaths
+                .remove(&target);
+            if !alive {
+                continue;
+            }
+            let e = &self.entities[&target];
+            let mut make = Writer::new();
+            make.i16(0).i16(1).i16(e.kind as i16);
+            make.0
+                .extend(self.stats(target, id).expect("known living enemy stats"));
+            make.i16(0);
+            // Sticky native deaths need DROP then MAKE after projectile resolution: https://github.com/moistosaurus/realm-cli/blob/a13c855dc5e09ee301fd0a66fcd303cfb5dff74e/src/com/company/assembleegameclient/objects/GameObject.as#L684-L693
+            let mut drop = Writer::new();
+            drop.i16(0).i16(0).i16(1).i32(target);
+            let p = &self.players[&id];
+            send(p, wire::UPDATE, drop.0);
+            send(p, wire::UPDATE, make.0);
+            tracing::info!(
+                player = id,
+                target,
+                enemy_kind = e.kind,
+                bullet,
+                projectile_born_ms = ?born,
+                game_ms = self.now,
+                hp = e.hp,
+                conditions = e.conditions(self.now),
+                "native enemy death prediction reconciled"
+            );
+        }
+    }
+
+    pub fn acknowledge_tick(&mut self, id: i32, tick: i32) -> Result<()> {
+        let p = self
+            .players
+            .get_mut(&id)
+            .context("tick ACK player missing")?;
+        ensure!(
+            tick >= 0 && tick < p.tick,
+            crate::server::lifecycle::protocol("unsolicited tick acknowledgement")
+        );
+        // NEW_TICK queues MOVE before applying inventory; earlier SHOOTs still use the old weapon.
+        p.weapon_ticks.retain(|(sent, _, _)| *sent >= tick);
+        Ok(())
+    }
     pub(super) fn validate_native_position(&self, id: i32, pos: Pos, time: i32) -> Result<()> {
         let p = self.players.get(&id).context("native player missing")?;
-        ensure!(p.active(), "inactive native character");
+        ensure!(p.persistence_failure.is_none(), "inactive native character");
+        ensure!(
+            p.active(),
+            crate::server::lifecycle::controller("inactive native character")
+        );
         ensure!(
             time >= 0 && time >= p.last_move,
-            "native position clock regressed"
+            crate::server::lifecycle::controller("native position clock regressed")
         );
         ensure!(
             pos.x.is_finite() && pos.y.is_finite(),
-            "non-finite native position"
+            crate::server::lifecycle::controller("non-finite native position")
         );
         ensure!(
-            self.walkable(pos),
-            "native position is outside walkable terrain"
+            self.player_step_valid(p.pos, pos),
+            crate::server::lifecycle::controller("native position is outside walkable terrain")
         );
         Ok(())
     }
@@ -119,17 +253,22 @@ impl World {
             .players
             .get_mut(&id)
             .context("GOTO ACK player missing")?;
-        let (own, sent) = *p
-            .goto_acks
-            .front()
-            .context("unsolicited GOTO acknowledgement")?;
-        ensure!(time >= 0, "negative GOTO acknowledgement time");
+        let (own, sent) = *p.goto_acks.front().ok_or_else(|| {
+            crate::server::lifecycle::protocol("unsolicited GOTO acknowledgement")
+        })?;
+        ensure!(
+            time >= 0,
+            crate::server::lifecycle::protocol("negative GOTO acknowledgement time")
+        );
         ensure!(
             sent.elapsed() <= ACK_TIMEOUT,
-            "GOTO acknowledgement timed out"
+            crate::server::lifecycle::protocol("GOTO acknowledgement timed out")
         );
         if own {
-            ensure!(time >= p.last_move, "GOTO acknowledgement clock regressed");
+            ensure!(
+                time >= p.last_move,
+                crate::server::lifecycle::protocol("GOTO acknowledgement clock regressed")
+            );
             // The native client ACKs with lastUpdate_, then moves to the supplied position.
             p.last_move = time;
         }
@@ -142,30 +281,37 @@ impl World {
         let p = self.players.get(&id).context("player missing")?;
         ensure!(
             time >= 0 && time >= p.last_attack,
-            "invalid correcting SHOOT time"
+            crate::server::lifecycle::protocol("invalid correcting SHOOT time")
         );
         ensure!(
-            p.character.items[0] == i32::from(kind),
-            "weapon does not match equipped item"
+            p.character.items[0] == i32::from(kind) || p.advertised_weapon(kind),
+            crate::server::lifecycle::protocol("weapon does not match equipped item")
         );
-        ensure!(bullet == p.next_bullet, "unexpected player bullet counter");
+        ensure!(
+            bullet == p.next_bullet,
+            crate::server::lifecycle::protocol("unexpected player bullet counter")
+        );
         let (last, count) = p
             .discarded_attack
             .unwrap_or((p.last_attack, p.attack_count));
-        ensure!(time >= last, "discarded attack clock regressed");
+        ensure!(
+            time >= last,
+            crate::server::lifecycle::protocol("discarded attack clock regressed")
+        );
         let item = self.content.get(kind)?;
         let count = if time == last { count } else { 0 };
         if time != last {
-            let rate = 0.0015 + 0.0065 * p.character.effective(&self.content)?[5] as f64 / 75.;
+            let dex = p.advertised_dex(p.effective(&self.content, self.now)?[5]);
+            let rate = 0.0015 + 0.0065 * dex as f64 / 75.;
             let cooldown = (1. / (rate * f64::from(item.rate))).floor() as f32;
             ensure!(
                 i64::from(time) - i64::from(last) >= cooldown as i64 - 2,
-                "discarded attack too fast"
+                crate::server::lifecycle::protocol("discarded attack too fast")
             );
         }
         ensure!(
             count < item.shots,
-            "too many discarded projectiles in attack"
+            crate::server::lifecycle::protocol("too many discarded projectiles in attack")
         );
         Ok(count)
     }
@@ -207,7 +353,7 @@ impl World {
         let p = self.players.get(&id).context("player missing")?;
         ensure!(
             time >= 0 && pos.x.is_finite() && pos.y.is_finite(),
-            "invalid correcting MOVE"
+            crate::server::lifecycle::protocol("invalid correcting MOVE")
         );
         let correcting = p.correcting()?;
         if correcting {
@@ -233,14 +379,17 @@ impl World {
         let correcting = p.correcting()?;
         let continuing = p.discarded_attack.is_some_and(|(last, _)| time == last);
         if let Some((last, _)) = p.discarded_attack {
-            ensure!(time >= last, "discarded attack clock regressed");
+            ensure!(
+                time >= last,
+                crate::server::lifecycle::protocol("discarded attack clock regressed")
+            );
         }
         if !correcting && !continuing {
             return Ok(false);
         }
         ensure!(
             start.x.is_finite() && start.y.is_finite() && angle.is_finite(),
-            "invalid correcting SHOOT"
+            crate::server::lifecycle::protocol("invalid correcting SHOOT")
         );
         let count = self.validate_discarded_shot(id, time, bullet, kind)?;
         self.consume_native_discard(id, time, bullet, kind, count)?;
@@ -255,7 +404,7 @@ impl World {
                     .is_some_and(|(_, sent)| sent.elapsed() > ACK_TIMEOUT)
             {
                 if let Some(output) = &p.tx {
-                    output.lost.send_replace(true);
+                    lose(&output.lost, "goto_ack_timeout");
                 }
                 p.departing = true;
                 tracing::error!(
@@ -264,5 +413,227 @@ impl World {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn predicted_enemy_death_waits_for_authority_and_rebuilds_only_the_sender_view() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let content = Arc::new(Content::load(&data).unwrap());
+        let map = Arc::new(Map::load(&data.join("nexus.wmap"), &content).unwrap());
+        let mut world = World::new(content, map).unwrap();
+        let mut character: Character = serde_json::from_value(serde_json::json!({
+            "schema":1,"lifetime":crate::store::FameLifetime::complete(),
+            "class":0x31e,"base":[200,100,15,0,7,10,10,10],
+            "id":1,"account":1,"name":"Prediction","level":1,"exp":0,
+            "fame":0,"hp":200,"mp":100,"revision":0,"alive":true,
+            "items":[0xa00,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1]
+        }))
+        .unwrap();
+        let id = world.enter(character.clone(), None).unwrap();
+        character.id = 2;
+        character.account = 2;
+        let observer = world.enter(character, None).unwrap();
+        let pos = world.players[&id].pos;
+        let target = world.spawn_entity(0x6b1, pos, vec![]).unwrap();
+        let enemy = world.entities.get_mut(&target).unwrap();
+        enemy.hp = 1;
+        enemy.condition |= crate::condition::bit(crate::condition::INVULNERABLE);
+        let (tx, mut rx) = mpsc::channel(16);
+        let (other, mut other_rx) = mpsc::channel(16);
+        let (lost, _) = watch::channel(None);
+        for (player, packets) in [(id, tx), (observer, other)] {
+            world.players.get_mut(&player).unwrap().controller = Controller::Human;
+            world.updates(player, true).unwrap();
+            let p = world.players.get_mut(&player).unwrap();
+            assert!(p.known.contains(&target));
+            p.tx = Some(Output {
+                packets,
+                lost: lost.clone(),
+            });
+        }
+        let start = Pos {
+            x: pos.x + 0.3,
+            y: pos.y,
+        };
+        let bullet = world.players[&id].next_bullet;
+        world.shoot(id, 1000, bullet, 0xa00, start, 0.).unwrap();
+        for _ in 0..3 {
+            world
+                .native_predicted_enemy_death(id, bullet, target)
+                .unwrap();
+        }
+        assert_eq!(world.players[&id].predicted_deaths.len(), 1);
+        while rx.try_recv().is_ok() {}
+        while other_rx.try_recv().is_ok() {}
+        world.reconcile_enemy_deaths();
+        assert!(
+            rx.try_recv().is_err(),
+            "an unresolved projectile is not a false prediction"
+        );
+        assert_eq!(world.players[&id].predicted_deaths.len(), 1);
+        assert_eq!(
+            world
+                .damage_enemy(id, target, 1000, false, &[], Some(bullet))
+                .unwrap(),
+            0
+        );
+        world.bullets[0].hit.insert(target);
+        let projectile = world.bullets[0].clone();
+        while rx.try_recv().is_ok() {}
+        while other_rx.try_recv().is_ok() {}
+        world.step();
+        let drop = rx
+            .try_recv()
+            .expect("surviving enemy must clear native sticky death");
+        assert_eq!(drop.id, wire::UPDATE);
+        let mut r = crate::wire::Reader::new(&drop.body);
+        assert_eq!(
+            (
+                r.i16().unwrap(),
+                r.i16().unwrap(),
+                r.i16().unwrap(),
+                r.i32().unwrap()
+            ),
+            (0, 0, 1, target)
+        );
+        r.done().unwrap();
+        let make = rx.try_recv().expect("separate MAKE must follow DROP");
+        assert_eq!(make.id, wire::UPDATE);
+        let mut r = crate::wire::Reader::new(&make.body);
+        assert_eq!(
+            (r.i16().unwrap(), r.i16().unwrap(), r.i16().unwrap()),
+            (0, 1, 0x6b1)
+        );
+        assert_eq!(r.i32().unwrap(), target);
+        r.f32().unwrap();
+        r.f32().unwrap();
+        let mut stats = BTreeMap::new();
+        for _ in 0..r.i16().unwrap() {
+            stats.insert(r.u8().unwrap(), r.i32().unwrap());
+        }
+        assert_eq!(stats[&1], 1);
+        assert_ne!(
+            stats[&29] & crate::condition::bit(crate::condition::INVULNERABLE),
+            0
+        );
+        assert_eq!(r.i16().unwrap(), 0);
+        r.done().unwrap();
+        assert!(rx.try_recv().is_err());
+        assert!(
+            other_rx.try_recv().is_err(),
+            "another client's object is unchanged"
+        );
+        assert_eq!(world.entities[&target].hp, 1);
+        assert_eq!(world.entities[&target].damage.values().sum::<i32>(), 0);
+        assert_eq!(world.players[&id].character.kills, 0);
+        assert!(world.players[&id].predicted_deaths.is_empty());
+        let next = world.bullets.len();
+        world.bullets.push(projectile);
+        world.bullets[next].hit.clear();
+        world
+            .native_predicted_enemy_death(id, bullet, target)
+            .unwrap();
+        world.bullets[next].born += 50;
+        world.reconcile_enemy_deaths();
+        assert!(
+            world.players[&id].predicted_deaths.is_empty(),
+            "reused bullet ID cannot retain an older prediction"
+        );
+        assert_eq!(
+            (rx.try_recv().unwrap().id, rx.try_recv().unwrap().id),
+            (wire::UPDATE, wire::UPDATE)
+        );
+        world
+            .native_predicted_enemy_death(id, bullet, target)
+            .unwrap();
+        world.entities.get_mut(&target).unwrap().hp = 0;
+        world.reconcile_enemy_deaths();
+        assert!(
+            rx.try_recv().is_err(),
+            "a genuine death must never be recreated"
+        );
+        world.entities.get_mut(&target).unwrap().hp = 1;
+        world.players.get_mut(&id).unwrap().known.remove(&target);
+        for unknown in [target, observer, i32::MAX] {
+            world
+                .native_predicted_enemy_death(id, bullet, unknown)
+                .unwrap();
+        }
+        assert!(world.players[&id].predicted_deaths.is_empty());
+    }
+
+    #[test]
+    fn native_dexterity_drop_reconciles_only_until_tick_ack_without_extra_damage() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let content = Arc::new(Content::load(&data).unwrap());
+        let map = Arc::new(Map::load(&data.join("nexus.wmap"), &content).unwrap());
+        let mut world = World::new(content, map).unwrap();
+        let character: Character = serde_json::from_value(serde_json::json!({
+            "schema":1,"lifetime":crate::store::FameLifetime::complete(),
+            "class":0x31d,"base":[200,100,15,0,7,10,10,10],
+            "id":1,"account":1,"name":"Cadence","level":1,"exp":0,
+            "fame":0,"hp":200,"mp":100,"revision":0,"alive":true,
+            "items":[0xa00,-1,-1,0xacc,-1,-1,-1,-1,-1,-1,-1,-1]
+        }))
+        .unwrap();
+        let id = world.enter(character, None).unwrap();
+        world.players.get_mut(&id).unwrap().controller = Controller::Human;
+        world.step();
+        world.step();
+        let pos = world.players[&id].pos;
+        let start = Pos {
+            x: pos.x + 0.3,
+            y: pos.y,
+        };
+        let shot = |world: &mut World, time, bullet| {
+            let received = world.clock.now();
+            world.native_shoot_received(id, (time, received), bullet, 0xa00, start, 0.)
+        };
+        assert_eq!(shot(&mut world, 1000, 1).unwrap(), NativeInput::Applied);
+        world.players.get_mut(&id).unwrap().character.items[3] = -1;
+        assert!(world.shoot(id, 1350, 2, 0xa00, start, 0.).is_err());
+        let correcting = world.validate_discarded_shot(id, 1350, 2, 0xa00);
+        let seed = world.players[&id].seed;
+        assert_eq!(
+            shot(&mut world, 1350, 2).expect("old advertised DEX still predicts a 326-ms attack"),
+            NativeInput::Applied
+        );
+        assert_eq!(correcting.unwrap(), 0);
+        assert_eq!(world.players[&id].next_bullet, 3);
+        assert_eq!(
+            world.players[&id].seed,
+            ((u64::from(seed) * 16807) % 2147483647) as u32
+        );
+        assert_eq!(world.players[&id].character.shots, 1);
+        assert_eq!(
+            world
+                .bullets
+                .iter()
+                .filter(|bullet| bullet.owner == id)
+                .count(),
+            1
+        );
+        assert!(world.players[&id].attack_suppressed.is_some());
+        world.step();
+        world.step();
+        let tick = world.players[&id].tick - 1;
+        world.acknowledge_tick(id, tick).unwrap();
+        assert!(world.validate_discarded_shot(id, 1700, 3, 0xa00).is_err());
+        let error = shot(&mut world, 1700, 3).unwrap_err();
+        assert!(error.to_string().contains("attack too fast"));
+        assert_eq!(world.players[&id].next_bullet, 3);
+        assert_eq!(shot(&mut world, 1800, 3).unwrap(), NativeInput::Applied);
+        assert_eq!(world.players[&id].character.shots, 2);
+        assert!(
+            shot(&mut world, 1800, 4)
+                .unwrap_err()
+                .to_string()
+                .contains("too many projectiles")
+        );
     }
 }
