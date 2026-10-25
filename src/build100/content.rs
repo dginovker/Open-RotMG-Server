@@ -315,6 +315,49 @@ impl Object {
         );
         Ok(projectile)
     }
+    pub fn shoot_ability_projectile(&self, class: i16) -> Result<&Projectile> {
+        if self.id != 0xa08 {
+            ensure!(class == 0x307, "normal quiver requires Archer");
+            return self.quiver_projectile();
+        }
+        ensure!(
+            class == 0x31e
+                && self.class == "Equipment"
+                && self.slot_type == Some(5)
+                && !self.consumable
+                && self.activations.len() == 1
+                && self.activations[0].action()? == Action::Shoot
+                && self.mp_cost == Some(80)
+                && self.root_damage == Some((30, 70))
+                && self.bonuses == [(21, 2)]
+                && self.num_projectiles == 1
+                && self.arc_gap_radians == std::f32::consts::PI / 16.
+                && self.rate_of_fire.is_none()
+                && self.projectiles.len() == 1,
+            "unsupported Wooden Shield/Knight Shoot shape"
+        );
+        let projectile = self.unique_projectile(0)?;
+        let effects = [ConditionEffect {
+            condition: Condition::Stunned,
+            duration_seconds: 3.,
+        }];
+        ensure!(
+            self.effects == effects
+                && projectile.effects == effects
+                && projectile.visual == "Silver Shield"
+                && projectile.min == 30
+                && projectile.max == 70
+                && projectile.speed == 16.
+                && projectile.lifetime == 0.2
+                && !projectile.wavy
+                && projectile.amplitude == 0.
+                && projectile.frequency == 1.
+                && projectile.continues
+                && projectile.features == ["ConditionEffect", "Continues"],
+            "unsupported Wooden Shield root/projectile semantics"
+        );
+        Ok(projectile)
+    }
     pub fn single_activation(&self) -> Result<&Activation> {
         ensure!(
             self.activations.len() == 1,

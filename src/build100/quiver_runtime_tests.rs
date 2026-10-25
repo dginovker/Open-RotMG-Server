@@ -73,7 +73,7 @@ pub(crate) fn snapshot(room: &Room) -> String {
         .map(|(&id, a)| {
             (
                 id,
-                a.quiver_ack,
+                a.shoot_ability_ack,
                 a.move_at,
                 a.move_credit,
                 a.teleport_ready,
@@ -105,12 +105,13 @@ pub(crate) fn snapshot(room: &Room) -> String {
             shore_runtime_tests::snapshot(room),
             players,
             &room.enemy_slows,
-            &room.enemy_paralysis
+            &room.enemy_paralysis,
+            &room.enemy_stuns
         )
     )
 }
 pub(crate) fn acknowledgement(room: &Room, owner: i32) -> Option<i16> {
-    room.players[&owner].quiver_ack
+    room.players[&owner].shoot_ability_ack
 }
 fn reject(c: &Content, room: &Room, input: Packet) -> String {
     let mut candidate = room.clone();
@@ -450,7 +451,7 @@ fn quiver_runtime_successful_swap_drop_teleport_detach_invalidate_declines_prese
     assert_eq!(acknowledgement(&room, 1), None);
     reject(&c, &room, cast(1, 1, 1, (0., 0.)));
 }
-fn bow(room: &Room, c: &Content, id: u8) -> Packet {
+pub(crate) fn bow(room: &Room, c: &Content, id: u8) -> Packet {
     let p = room.character(1);
     let kind = p.stats[&8] as i16;
     let visual = c
@@ -500,7 +501,7 @@ fn quiver_runtime_shared_native_ids_wrap_retired_reuse_live_and_reserved_burst_c
         // A partial multi-arrow weapon cannot be interleaved with a native ability.
         let mut r = room.clone();
         r.bullets.clear();
-        r.players.get_mut(&1).unwrap().quiver_ack = None;
+        r.players.get_mut(&1).unwrap().shoot_ability_ack = None;
         let kind = r.character(1).stats[&8] as i16;
         c.objects.get_mut(&kind).unwrap().num_projectiles = 2;
         let p = bow(&r, &c, 10);
@@ -513,7 +514,7 @@ fn quiver_runtime_shared_native_ids_wrap_retired_reuse_live_and_reserved_burst_c
     }
 }
 
-fn target(room: &mut Room, c: &Content, position: (f32, f32), hp: i32) -> i32 {
+pub(crate) fn target(room: &mut Room, c: &Content, position: (f32, f32), hp: i32) -> i32 {
     let id = room.allocate_entity().unwrap();
     let def = c.get(0x600).unwrap();
     let mut stats = def.stats.clone();
@@ -1670,7 +1671,7 @@ fn quiver_runtime_paid_paralyzed_next_advance_independent_slow_overwrite_project
         room.enemy_paralysis.insert(id, 10.);
         room.character_mut(1).stats.insert(4, 100);
         room.character_mut(1).resources_carry = Some(ResourceCarry::ZERO);
-        room.players.get_mut(&1).unwrap().quiver_ack = None;
+        room.players.get_mut(&1).unwrap().shoot_ability_ack = None;
         let input = fire(&room, 1, 1);
         room.handle(1, input, &c).unwrap();
         room.advance(0.1, &c).unwrap();

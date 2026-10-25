@@ -2,14 +2,15 @@ use super::*;
 use crate::world::{quiver_runtime_tests as quiver, spell_runtime_tests::cast};
 
 async fn archer(h: &Harness, guid: &str, route: i32) -> Client {
-    archer_with_item(h, guid, route, 0xa61).await
+    equipped_shooter(h, guid, route, 0xa61).await
 }
-async fn archer_with_item(h: &Harness, guid: &str, route: i32, item: i16) -> Client {
+async fn equipped_shooter(h: &Harness, guid: &str, route: i32, item: i16) -> Client {
     let mut a = h.join(guid, route).await.unwrap();
     h.input(
         a.session,
         packet(3, |w| {
-            w.i16(0x307).utf("Archer");
+            w.i16(if item == 0xa08 { 0x31e } else { 0x307 })
+                .utf("Shooter");
         }),
     )
     .await
@@ -17,7 +18,7 @@ async fn archer_with_item(h: &Harness, guid: &str, route: i32, item: i16) -> Cli
     a.avatar = Reader::new(&drain(&mut a).iter().find(|p| p.id == 1).unwrap().body)
         .i32()
         .unwrap();
-    if item != 0xa61 {
+    if !matches!(item, 0xa61 | 0xa08) {
         let session = a.session;
         h.inspect(move |s| {
             let world = s.sessions[&session].world;
@@ -36,8 +37,15 @@ async fn archer_with_item(h: &Harness, guid: &str, route: i32, item: i16) -> Cli
 }
 async fn shot(h: &Harness, a: &Client, id: u8) -> Packet {
     let (session, avatar) = (a.session, a.avatar);
-    h.inspect(move |s| quiver::fire(&s.worlds[&s.sessions[&session].world], avatar, id))
-        .await
+    h.inspect(move |s| {
+        let room = &s.worlds[&s.sessions[&session].world];
+        if room.character(avatar).kind == 0x31e {
+            world::shield_runtime_tests::fire(room, avatar, id)
+        } else {
+            quiver::fire(room, avatar, id)
+        }
+    })
+    .await
 }
 fn rows(db: &Database) -> Vec<(String, String)> {
     db.lock()
@@ -67,14 +75,14 @@ fn shot_ids(out: &[Packet], owner: i32) -> Vec<u8> {
 }
 #[tokio::test]
 async fn quiver_actor_one_payment_suppressed_caster_one_peer_shoot_then_mp_status_no_replay() {
-    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+    for item in [0xa61, 0xa63, 0xa64, 0xa65, 0xa08] {
         let remaining = match item {
             0xa61 => 40,
             0xa65 => 0,
             _ => 20,
         };
         let h = Harness::normal();
-        let mut a = archer_with_item(&h, A, 0, item).await;
+        let mut a = equipped_shooter(&h, A, 0, item).await;
         let (mut b, _) = h.enter(B).await;
         drain(&mut a);
         drain(&mut b);
@@ -192,7 +200,7 @@ async fn quiver_actor_marker_survives_real_pong_move_tick_and_advisory_report_wi
 }
 #[tokio::test]
 async fn quiver_actor_sql_begin_at_each_phase_and_write_at8_preserve_actual_prephase() {
-    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+    for item in [0xa61, 0xa63, 0xa64, 0xa65, 0xa08] {
         let remaining = match item {
             0xa61 => 40,
             0xa65 => 0,
@@ -201,7 +209,7 @@ async fn quiver_actor_sql_begin_at_each_phase_and_write_at8_preserve_actual_prep
         for phase in [8, 15] {
             for begin in [false, true] {
                 let h = Harness::normal();
-                let mut a = archer_with_item(&h, A, 0, item).await;
+                let mut a = equipped_shooter(&h, A, 0, item).await;
                 let (mut b, _) = h.enter(B).await;
                 if phase == 15 {
                     h.input(a.session, shot(&h, &a, 1).await).await.unwrap();
@@ -264,7 +272,7 @@ async fn quiver_actor_sql_begin_at_each_phase_and_write_at8_preserve_actual_prep
 }
 #[tokio::test]
 async fn quiver_actor_actual_dispatcher_storage_failure_fatal_before8_or_after_paid8() {
-    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+    for item in [0xa61, 0xa63, 0xa64, 0xa65, 0xa08] {
         let remaining = match item {
             0xa61 => 40,
             0xa65 => 0,
@@ -276,7 +284,7 @@ async fn quiver_actor_actual_dispatcher_storage_failure_fatal_before8_or_after_p
                     continue;
                 }
                 let h = Harness::normal();
-                let mut a = archer_with_item(&h, A, 0, item).await;
+                let mut a = equipped_shooter(&h, A, 0, item).await;
                 if phase == 15 {
                     h.input(a.session, shot(&h, &a, 1).await).await.unwrap();
                 }
@@ -314,51 +322,54 @@ async fn quiver_actor_actual_dispatcher_storage_failure_fatal_before8_or_after_p
 }
 #[tokio::test]
 async fn quiver_actor_current_whole_room_owner_generation_corruption_fails_closed_at8_and15() {
-    for phase in [8, 15] {
-        for case in 0..8 {
-            let h = Harness::normal();
-            let mut a = archer(&h, A, 0).await;
-            let (mut b, _) = h.enter(B).await;
-            if phase == 15 {
-                h.input(a.session, shot(&h, &a, 1).await).await.unwrap();
+    for item in [0xa61, 0xa08] {
+        for phase in [8, 15] {
+            for case in 0..8 {
+                let h = Harness::normal();
+                let mut a = equipped_shooter(&h, A, 0, item).await;
+                let (mut b, _) = h.enter(B).await;
+                if phase == 15 {
+                    h.input(a.session, shot(&h, &a, 1).await).await.unwrap();
+                }
+                drain(&mut a);
+                drain(&mut b);
+                let p = if phase == 8 {
+                    shot(&h, &a, 1).await
+                } else {
+                    cast(a.avatar, 1, a.avatar, (0., 0.))
+                };
+                let (caster, peer, avatar) = (a.session, b.session, b.avatar);
+                h.inspect(move |s| match case {
+                    0 => {
+                        s.owners.remove(A);
+                    }
+                    1 => {
+                        s.owners.insert(B.into(), caster);
+                    }
+                    2 => s.sessions.get_mut(&peer).unwrap().generation = Some(99),
+                    3 => s.sessions.get_mut(&caster).unwrap().generation = Some(99),
+                    4 => s.sessions.get_mut(&peer).unwrap().world = 999,
+                    5 => s.sessions.get_mut(&peer).unwrap().avatar = Some(99999),
+                    6 => s.sessions.get_mut(&caster).unwrap().avatar = Some(avatar),
+                    7 => {
+                        s.sessions.remove(&peer);
+                    }
+                    _ => unreachable!(),
+                })
+                .await;
+                let before = state(&h).await;
+                assert!(h.input(a.session, p).await.is_err());
+                assert_eq!(state(&h).await, before);
+                assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
+                h.stop().await;
             }
-            drain(&mut a);
-            drain(&mut b);
-            let p = if phase == 8 {
-                shot(&h, &a, 1).await
-            } else {
-                cast(a.avatar, 1, a.avatar, (0., 0.))
-            };
-            let (caster, peer, avatar) = (a.session, b.session, b.avatar);
-            h.inspect(move |s| match case {
-                0 => {
-                    s.owners.remove(A);
-                }
-                1 => {
-                    s.owners.insert(B.into(), caster);
-                }
-                2 => s.sessions.get_mut(&peer).unwrap().generation = Some(99),
-                3 => s.sessions.get_mut(&caster).unwrap().generation = Some(99),
-                4 => s.sessions.get_mut(&peer).unwrap().world = 999,
-                5 => s.sessions.get_mut(&peer).unwrap().avatar = Some(99999),
-                6 => s.sessions.get_mut(&caster).unwrap().avatar = Some(avatar),
-                7 => {
-                    s.sessions.remove(&peer);
-                }
-                _ => unreachable!(),
-            })
-            .await;
-            let before = state(&h).await;
-            assert!(h.input(a.session, p).await.is_err());
-            assert_eq!(state(&h).await, before);
-            assert!(drain(&mut a).is_empty() && drain(&mut b).is_empty());
-            h.stop().await;
         }
     }
 }
+
 #[tokio::test]
 async fn quiver_actor_postcommit_full_closed_peer8_and_caster15_detach_without_refund_or_replay() {
-    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+    for item in [0xa61, 0xa63, 0xa64, 0xa65, 0xa08] {
         let remaining = match item {
             0xa61 => 40,
             0xa65 => 0,
@@ -367,7 +378,7 @@ async fn quiver_actor_postcommit_full_closed_peer8_and_caster15_detach_without_r
         for caster in [false, true] {
             for closed in [false, true] {
                 let h = Harness::normal();
-                let mut a = archer_with_item(&h, A, 0, item).await;
+                let mut a = equipped_shooter(&h, A, 0, item).await;
                 let (mut b, _) = h.enter(B).await;
                 drain(&mut a);
                 drain(&mut b);
@@ -421,14 +432,14 @@ async fn quiver_actor_postcommit_full_closed_peer8_and_caster15_detach_without_r
 }
 #[tokio::test]
 async fn quiver_actor_caster8_suppression_defers_failed_output_to_status_and_never_refunds() {
-    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+    for item in [0xa61, 0xa63, 0xa64, 0xa65, 0xa08] {
         let remaining = match item {
             0xa61 => 40,
             0xa65 => 0,
             _ => 20,
         };
         let h = Harness::normal();
-        let mut a = archer_with_item(&h, A, 0, item).await;
+        let mut a = equipped_shooter(&h, A, 0, item).await;
         let (mut b, _) = h.enter(B).await;
         drain(&mut a);
         drain(&mut b);
@@ -447,7 +458,7 @@ async fn quiver_actor_caster8_suppression_defers_failed_output_to_status_and_nev
 }
 #[tokio::test]
 async fn quiver_actor_disconnect_or_transfer_after8_keep_payment_and_forget_marker() {
-    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+    for item in [0xa61, 0xa63, 0xa64, 0xa65, 0xa08] {
         let remaining = match item {
             0xa61 => 40,
             0xa65 => 0,
@@ -455,7 +466,7 @@ async fn quiver_actor_disconnect_or_transfer_after8_keep_payment_and_forget_mark
         };
         for transfer in [false, true] {
             let h = Harness::normal();
-            let mut a = archer_with_item(&h, A, if transfer { -1 } else { 0 }, item).await;
+            let mut a = equipped_shooter(&h, A, if transfer { -1 } else { 0 }, item).await;
             if transfer {
                 h.near_exit(&a).await;
             }
@@ -535,9 +546,9 @@ async fn quiver_actor_iron_steel_golden_advance_begin_write_failure_installs_no_
         for begin in [false, true] {
             for dispatcher in [false, true] {
                 let h = Harness::normal();
-                let mut a = archer_with_item(&h, A, 0, item).await;
+                let mut a = equipped_shooter(&h, A, 0, item).await;
                 let mut b = if item == 0xa64 {
-                    archer_with_item(&h, B, 0, item).await
+                    equipped_shooter(&h, B, 0, item).await
                 } else {
                     h.enter(B).await.0
                 };
@@ -645,7 +656,7 @@ async fn quiver_actor_iron_steel_golden_advance_begin_write_failure_installs_no_
 async fn quiver_actor_golden_paid_separate_contacts_real_advisory_repair_preserves_paralysis_and_ledger()
  {
     let h = Harness::normal();
-    let mut a = archer_with_item(&h, A, 0, 0xa65).await;
+    let mut a = equipped_shooter(&h, A, 0, 0xa65).await;
     let (mut b, _) = h.enter(B).await;
     let avatar = a.avatar;
     let targets = h
@@ -731,3 +742,6 @@ async fn quiver_actor_golden_paid_separate_contacts_real_advisory_repair_preserv
     assert_eq!(character(&h.db, A).unwrap().unwrap().stats[&6], 0);
     h.stop().await;
 }
+
+#[path = "shield_actor_tests.rs"]
+mod shield_actor_tests;
