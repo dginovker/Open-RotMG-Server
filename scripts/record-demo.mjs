@@ -15,7 +15,7 @@ export function media(args) {
   requireValue(result.status === 0, `Media validation failed: ${result.stderr || result.stdout}`);
   return result.stdout;
 }
-export async function socket(url, Socket = WebSocket) {
+export async function socket(url, Socket = WebSocket, onEvent) {
   const ws = new Socket(url), pending = new Map(); let sequence = 0;
   const fail = message => { for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Error(message)); } pending.clear(); };
   await new Promise((resolve, reject) => {
@@ -28,6 +28,7 @@ export async function socket(url, Socket = WebSocket) {
   ws.onmessage = event => {
     let message;
     try { message = JSON.parse(event.data); } catch { fail('Malformed CDP response'); ws.close(); return; }
+    if (message.method) { onEvent?.(message); return; }
     const p = pending.get(message.id);
     if (!p) return;
     pending.delete(message.id); clearTimeout(p.timer);
@@ -47,14 +48,14 @@ export async function socket(url, Socket = WebSocket) {
     close() { fail('CDP connection released'); ws.close(); },
   };
 }
-export async function connect({port, target, url, helper}) {
+export async function connect({port, target, url, helper, onEvent}) {
   requireValue(Number.isInteger(port) && port >= 1024 && port <= 65535, 'Explicit local Chrome port required');
   requireValue(helper && path.isAbsolute(helper), 'Explicit absolute managed-CDP helper path required');
   const helpers = await import(pathToFileURL(helper).href);
   const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`, {signal:AbortSignal.timeout(10000)})).json();
   const matches = pages.filter(p => p.type === 'page' && p.id === target && p.url === url);
   requireValue(matches.length === 1, 'Fresh owned target/URL missing or ambiguous');
-  const raw = await socket(matches[0].webSocketDebuggerUrl);
+  const raw = await socket(matches[0].webSocketDebuggerUrl, WebSocket, onEvent);
   try {
     const call = await helpers.managedCDP(port, target, helpers.scriptOwner(), raw.call);
     return {call, close:raw.close, async eval(expression) {
