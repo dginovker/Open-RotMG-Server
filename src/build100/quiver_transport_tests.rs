@@ -1,9 +1,9 @@
 use super::*;
 
 #[tokio::test]
-async fn quiver_transport_encrypted_split_coalesced_serial_awaited_replies_no_adjacency_or_deadlock()
+async fn quiver_and_wooden_shield_transport_encrypted_split_coalesced_serial_awaited_replies_no_adjacency_or_deadlock()
  {
-    for item in [0xa61, 0xa63, 0xa64, 0xa65] {
+    for item in [0xa61, 0xa63, 0xa64, 0xa65, 0xa08] {
         let remaining = match item {
             0xa61 => 40,
             0xa65 => 0,
@@ -11,7 +11,7 @@ async fn quiver_transport_encrypted_split_coalesced_serial_awaited_replies_no_ad
         };
         for split in [false, true] {
             let h = Harness::normal();
-            let mut a = archer_with_item(&h, A, 0, item).await;
+            let mut a = equipped_shooter(&h, A, 0, item).await;
             let (mut b, _) = h.enter(B).await;
             drain(&mut a);
             drain(&mut b);

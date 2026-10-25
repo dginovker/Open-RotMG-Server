@@ -128,6 +128,7 @@ pub fn snapshot(room: &Room) -> String {
             room.elapsed.to_bits(),
             room.next_id,
             &room.server_projectile_cursors,
+            &room.enemy_stuns,
             room.rng.clone().next_u64()
         )
     )
