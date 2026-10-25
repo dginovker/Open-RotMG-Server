@@ -58,7 +58,7 @@ pub enum Ability {
     },
     SpiritBomb,
 }
-fn positive(n: Node<'_, '_>, name: &str) -> Result<f32> {
+pub(super) fn positive(n: Node<'_, '_>, name: &str) -> Result<f32> {
     let value: f32 = n
         .attribute(name)
         .with_context(|| format!("ability attribute {name} missing"))?
@@ -66,7 +66,7 @@ fn positive(n: Node<'_, '_>, name: &str) -> Result<f32> {
     ensure!(value.is_finite() && value > 0., "invalid ability {name}");
     Ok(value)
 }
-fn damage(n: Node<'_, '_>, name: &str) -> Result<i32> {
+pub(super) fn damage(n: Node<'_, '_>, name: &str) -> Result<i32> {
     let value: i32 = n
         .attribute(name)
         .with_context(|| format!("ability attribute {name} missing"))?
@@ -77,14 +77,14 @@ fn damage(n: Node<'_, '_>, name: &str) -> Result<i32> {
     );
     Ok(value)
 }
-fn duration(n: Node<'_, '_>, name: &str) -> Result<u64> {
+pub(super) fn duration(n: Node<'_, '_>, name: &str) -> Result<u64> {
     let ms = std::time::Duration::try_from_secs_f32(positive(n, name)?)?
         .as_millis()
         .try_into()?;
     ensure!(ms > 0 && ms <= 60000, "invalid ability duration");
     Ok(ms)
 }
-fn effect(name: &str) -> Result<u8> {
+pub(super) fn effect(name: &str) -> Result<u8> {
     Ok(match name {
         "Invisible" => crate::condition::INVISIBLE,
         "Speedy" => 15,

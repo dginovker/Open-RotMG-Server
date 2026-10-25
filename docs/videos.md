@@ -1,4 +1,4 @@
-# Gameplay demos
+# Gameplay demos (optional)
 
 Use `scripts/record-demo.mjs` for capture, cursor timing, rendering and technical validation. Gameplay assertions remain in your scenario; recording success does not prove gameplay success. Capture the real before state before editing, then verify after through normal client gameplay. Keep state, scenarios and media outside Git.
 

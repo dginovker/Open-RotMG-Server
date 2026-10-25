@@ -1,0 +1,211 @@
+{
+  "status": "ENGINEERING_TOPOLOGY_CHOICES_ORIGINAL_STAT41_UNKNOWN",
+  "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+  "source_dimensions": [
+    2000,
+    2000
+  ],
+  "parent_annotations_sha256": "e7e34ed9bcec0f439b5f5225246a07ddce0cc605a43a5d2d22e00b31967fcfcf",
+  "original_stat41": "UNKNOWN",
+  "changed_source_pixels": 24,
+  "support_sha256_le_u32": "7c6c9ecb892a99dc47f44404a7255045a423afd5d818cc77b598af3cf7c8d906",
+  "new_finite_key": {
+    "config": "conn:16843010",
+    "source_xy": [
+      447,
+      941
+    ],
+    "positions_le_u32_values": [
+      1882447
+    ],
+    "support_sha256_le_u32": "3a0f7049a238f07e0d5c589bf311cad3ce76ef03c540ce335b0c466ad020d20c",
+    "meaning": "Selected-valid N/E/S T, W absent; not conn0, a blank default or general admission of unused geometries."
+  },
+  "supports": [
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1882447
+      ],
+      "pixels": 1,
+      "support_sha256_le_u32": "3a0f7049a238f07e0d5c589bf311cad3ce76ef03c540ce335b0c466ad020d20c",
+      "cell": {
+        "ground": 245,
+        "object": 477,
+        "config": "conn:16843010",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    },
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1856434
+      ],
+      "pixels": 1,
+      "support_sha256_le_u32": "dffc77af1d1792bc9ad9407b1dd376e0bc1fba5348e3cba5c9e952e9c631a878",
+      "cell": {
+        "ground": 245,
+        "object": 477,
+        "config": "conn:16843265",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    },
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1882421
+      ],
+      "pixels": 1,
+      "support_sha256_le_u32": "624d2a400cdfc1dc839b8dd6b7f4fda1d9344cbf573111900ee792a3580c0797",
+      "cell": {
+        "ground": 245,
+        "object": 477,
+        "config": "conn:16908545",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    },
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1884421,
+        1884447,
+        1910434
+      ],
+      "pixels": 3,
+      "support_sha256_le_u32": "838d20cf8fdc35becb87c4d01a5db54136e499d2996bca101185cea22cdd8e2c",
+      "cell": {
+        "ground": 245,
+        "object": 477,
+        "config": "conn:16908802",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    },
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1908434
+      ],
+      "pixels": 1,
+      "support_sha256_le_u32": "b93c313860c20cb6555cf882427053cb1020205cd816363fa35d5d02636157b3",
+      "cell": {
+        "ground": 245,
+        "object": 477,
+        "config": "conn:33620225",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    },
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1856433,
+        1882420,
+        1908433
+      ],
+      "pixels": 3,
+      "support_sha256_le_u32": "08b902da8123710b18bc2ad50a16f906f7ded8e42993f6b41472145114157bd6",
+      "cell": {
+        "ground": 245,
+        "object": 477,
+        "config": "conn:33620482",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    },
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1854434,
+        1880421,
+        1880447
+      ],
+      "pixels": 3,
+      "support_sha256_le_u32": "33fe78b4d3734c7639b2ad37b85f014581b60e13a56a76af9d4b18a13359c6c0",
+      "cell": {
+        "ground": 245,
+        "object": 477,
+        "config": "conn:33685762",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    },
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1856435,
+        1882448,
+        1908435
+      ],
+      "pixels": 3,
+      "support_sha256_le_u32": "2271f6e6cb0ef6ce7762a5deab7be4514d41a84a0751e91fd8ef75b48d070433",
+      "cell": {
+        "ground": 245,
+        "object": 477,
+        "config": "conn:33686017",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    },
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1862424,
+        1862444,
+        1902424,
+        1902444
+      ],
+      "pixels": 4,
+      "support_sha256_le_u32": "f7b2425279393d03413e6c822636b2cd7a531ee64501df385c7bc9f0b91b9c9b",
+      "cell": {
+        "ground": 245,
+        "object": 477,
+        "config": "conn:33686018",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    },
+    {
+      "source_sha256": "b22ff9156730a358e39c83ed37d11dadf86f282cd16e663e905f19eaa0cd20f5",
+      "rgb": "ffd56e",
+      "positions_le_u32_values": [
+        1874430,
+        1874438,
+        1890430,
+        1890438
+      ],
+      "pixels": 4,
+      "support_sha256_le_u32": "20dc93ef76fe2981e86d9b88dd441ef6cfd8fd266d40ac026a6f1cd95bcfd602",
+      "cell": {
+        "ground": 247,
+        "object": 477,
+        "config": "conn:33686018",
+        "terrain": 5,
+        "region": 0
+      },
+      "basis": "NEW source4-only engineering connection choice from these exact source cardinal477 neighbors. Selected N/E/S/W bytes use1=connected,2=absent; original stat41, hidden neighbors, foundation and all original five fields remain UNKNOWN. Existing primary underlay/tier/region are engineering choices, not recovered metadata."
+    }
+  ],
+  "scope": "Source-bound private engineering metadata only; no World4 WMAP/export/registration/original-field/fidelity/reuse-rights/release approval. No Source1 assignment or approval transfer."
+}

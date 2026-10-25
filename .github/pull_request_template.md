@@ -6,7 +6,6 @@ What can a player or contributor do differently?
 
 Tests and normal-client scenario/results:
 
-## Demo
+## Demo (optional)
 
-Gameplay/visual changes: add the 15-second demo URL following `docs/videos.md`.
-For nonvisual changes, state why a gameplay demo does not apply. Do not commit media files.
+See `docs/videos.md`. Do not commit media files.
