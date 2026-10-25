@@ -1,0 +1,157 @@
+{
+  "status": "NEW_PRIVATE_ENGINEERING_19_CELL_REVISION_PROPOSAL_NOT_EXPORTED",
+  "source_dimensions": [
+    2100,
+    2100
+  ],
+  "original_stat41": "UNKNOWN",
+  "supports": [
+    {
+      "source_sha256": "7404dfa562627e015160a88820017cfbcfb2c6de3676a18dcca3395bd4fc2cc1",
+      "rgb": "ffd36e",
+      "positions_le_u32_values": [
+        2353541
+      ],
+      "pixels": 1,
+      "support_sha256_le_u32": "57459b02360fc6fce32b27857e1ae4ae19ba102da8ff874cca4c422eb6126cb1",
+      "cell": {
+        "ground": 247,
+        "object": 477,
+        "config": "conn:16843265",
+        "terrain": 0,
+        "region": 0
+      },
+      "basis": "Selected T0, visible N/E/W arms"
+    },
+    {
+      "source_sha256": "7404dfa562627e015160a88820017cfbcfb2c6de3676a18dcca3395bd4fc2cc1",
+      "rgb": "ffd36e",
+      "positions_le_u32_values": [
+        2380828
+      ],
+      "pixels": 1,
+      "support_sha256_le_u32": "30deca613b2582c70b6e298a6a04fcd55542c1f8050f86b36539a0f8cfe0b8d1",
+      "cell": {
+        "ground": 247,
+        "object": 477,
+        "config": "conn:16908545",
+        "terrain": 0,
+        "region": 0
+      },
+      "basis": "Selected T270, visible N/S/W arms"
+    },
+    {
+      "source_sha256": "7404dfa562627e015160a88820017cfbcfb2c6de3676a18dcca3395bd4fc2cc1",
+      "rgb": "ffd36e",
+      "positions_le_u32_values": [
+        2382928,
+        2410241
+      ],
+      "pixels": 2,
+      "support_sha256_le_u32": "7d8db87f1ad79c898553273418eb913ff705a649df187867a7b45fc2200f706e",
+      "cell": {
+        "ground": 247,
+        "object": 477,
+        "config": "conn:16908802",
+        "terrain": 0,
+        "region": 0
+      },
+      "basis": "Selected ShortLine0, visible N arm"
+    },
+    {
+      "source_sha256": "7404dfa562627e015160a88820017cfbcfb2c6de3676a18dcca3395bd4fc2cc1",
+      "rgb": "ffd36e",
+      "positions_le_u32_values": [
+        2408141
+      ],
+      "pixels": 1,
+      "support_sha256_le_u32": "1180248f0dcab8c6196f8b157ecc90a6164bd09aa62d9b448157442fbc88d9c0",
+      "cell": {
+        "ground": 247,
+        "object": 477,
+        "config": "conn:33620225",
+        "terrain": 0,
+        "region": 0
+      },
+      "basis": "Selected T180, visible E/S/W arms"
+    },
+    {
+      "source_sha256": "7404dfa562627e015160a88820017cfbcfb2c6de3676a18dcca3395bd4fc2cc1",
+      "rgb": "ffd36e",
+      "positions_le_u32_values": [
+        2353540,
+        2380827,
+        2408140
+      ],
+      "pixels": 3,
+      "support_sha256_le_u32": "1818f60270503731570607e871b2267033941ab14c1a5fc1676b86d155289e17",
+      "cell": {
+        "ground": 247,
+        "object": 477,
+        "config": "conn:33620482",
+        "terrain": 0,
+        "region": 0
+      },
+      "basis": "Selected ShortLine90, visible E arm"
+    },
+    {
+      "source_sha256": "7404dfa562627e015160a88820017cfbcfb2c6de3676a18dcca3395bd4fc2cc1",
+      "rgb": "ffd36e",
+      "positions_le_u32_values": [
+        2351441,
+        2378728
+      ],
+      "pixels": 2,
+      "support_sha256_le_u32": "4e455521ca2282f469d639631de3a283262ebeb427343e7c51106662def54a9f",
+      "cell": {
+        "ground": 247,
+        "object": 477,
+        "config": "conn:33685762",
+        "terrain": 0,
+        "region": 0
+      },
+      "basis": "Selected ShortLine180, visible S arm"
+    },
+    {
+      "source_sha256": "7404dfa562627e015160a88820017cfbcfb2c6de3676a18dcca3395bd4fc2cc1",
+      "rgb": "ffd36e",
+      "positions_le_u32_values": [
+        2353542,
+        2408142
+      ],
+      "pixels": 2,
+      "support_sha256_le_u32": "f8cef72372d40e0d48d031aeaae0a23d5425010e70c5216c41f30ce2fb3b1869",
+      "cell": {
+        "ground": 247,
+        "object": 477,
+        "config": "conn:33686017",
+        "terrain": 0,
+        "region": 0
+      },
+      "basis": "Selected ShortLine270, visible W arm"
+    },
+    {
+      "source_sha256": "7404dfa562627e015160a88820017cfbcfb2c6de3676a18dcca3395bd4fc2cc1",
+      "rgb": "ffd36e",
+      "positions_le_u32_values": [
+        2359851,
+        2372437,
+        2372445,
+        2378754,
+        2389237,
+        2389245,
+        2401851
+      ],
+      "pixels": 7,
+      "support_sha256_le_u32": "b1a38dea28650d8bde87e9cd93d8d3e7295af22a43920892377bdee47779dcf5",
+      "cell": {
+        "ground": 247,
+        "object": 477,
+        "config": "conn:33686018",
+        "terrain": 0,
+        "region": 0
+      },
+      "basis": "Selected Dot0, no visible cardinal arms"
+    }
+  ]
+}

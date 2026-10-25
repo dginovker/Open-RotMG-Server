@@ -12,16 +12,16 @@ pub struct TeleportReceipt {
     pub tick: u64,
 }
 
-fn ready(p: &Player) -> bool {
+pub(super) fn ready(p: &Player) -> bool {
     p.active()
         && p.character.hp > 0
         && !p.pending
         && p.tx
             .as_ref()
-            .is_none_or(|tx| !*tx.lost.borrow() && !tx.packets.is_closed())
+            .is_none_or(|tx| !tx.lost.borrow().is_some() && !tx.packets.is_closed())
 }
 
-fn effect(kind: u8, target: i32, position: Pos) -> Vec<u8> {
+pub(super) fn effect(kind: u8, target: i32, position: Pos) -> Vec<u8> {
     let mut out = Writer::new();
     out.u8(kind)
         .i32(target)
@@ -45,14 +45,14 @@ impl Directory {
                     .checked_duration_since(*last)
                     .context("teleport receive clock regressed")?
                     >= Duration::from_secs(10),
-                "Too soon to teleport again; wait ten seconds."
+                controller("Too soon to teleport again; wait ten seconds.")
             );
         }
         self.teleports
             .retain(|_, last| received.saturating_duration_since(*last) < Duration::from_secs(10));
         ensure!(
             self.teleports.len() < 4096,
-            "Teleport rate registry is full."
+            controller("Teleport rate registry is full.")
         );
         let world = self.resolve(Target::Player(id))?;
         let movement_received = received
@@ -88,6 +88,13 @@ impl Directory {
             send(p, wire::SHOW_EFFECT, effect(2, id, position));
         }
         tracing::info!(player=id, account, target, x=position.x, y=position.y, world=%world.name, "player teleported");
+        world
+            .players
+            .get_mut(&id)
+            .unwrap()
+            .character
+            .lifetime
+            .teleported = true;
         self.teleports.insert(account, received);
         Ok(receipt)
     }
@@ -102,37 +109,52 @@ impl World {
     }
 
     fn teleport_destination(&self, id: i32, target: i32) -> Result<Pos> {
-        ensure!(self.allow_teleport(), "Cannot teleport in this world.");
+        ensure!(
+            self.allow_teleport(),
+            controller("Cannot teleport in this world.")
+        );
         let p = self
             .players
             .get(&id)
             .context("Teleport sender is no longer in this world.")?;
         ensure!(
-            ready(p),
+            p.persistence_failure.is_none(),
             "Busy, dead, departing or quarantined players cannot teleport."
         );
         ensure!(
-            !p.correcting()?,
-            "Position correction awaits GOTO acknowledgement."
+            ready(p),
+            controller("Busy, dead, departing or quarantined players cannot teleport.")
         );
-        ensure!(!p.paused, "Cannot teleport while paused.");
-        ensure!(id != target, "You are already at yourself.");
+        ensure!(
+            !p.correcting()?,
+            controller("Position correction awaits GOTO acknowledgement.")
+        );
+        ensure!(!p.paused, controller("Cannot teleport while paused."));
+        ensure!(id != target, controller("You are already at yourself."));
         let q = self
             .players
             .get(&target)
-            .context("Teleport target is not a live player in this world.")?;
+            .ok_or_else(|| controller("Teleport target is not a live player in this world."))?;
         ensure!(
             ready(q),
-            "Teleport target is busy, dead, departing or quarantined."
+            controller("Teleport target is busy, dead, departing or quarantined.")
         );
-        ensure!(!q.paused, "Cannot teleport to a paused player.");
+        ensure!(!q.paused, controller("Cannot teleport to a paused player."));
+        ensure!(
+            q.conditions(self.now) & crate::condition::bit(crate::condition::INVISIBLE) == 0,
+            controller("Cannot teleport to an invisible player.")
+        );
         ensure!(
             p.known.contains(&target),
-            "Teleport target has not been observed."
+            controller("Teleport target has not been observed.")
         );
         ensure!(
-            self.walkable(q.pos),
+            q.pos.x.is_finite() && q.pos.y.is_finite() && self.map.cell(q.pos.x, q.pos.y).is_some(),
             "Teleport target's position is blocked."
+        );
+        ensure!(
+            self.player_position_valid(None, q.pos),
+            controller("Teleport target's position is blocked.")
         );
         Ok(q.pos)
     }
@@ -156,8 +178,7 @@ impl World {
                     continue;
                 }
                 let cap = p
-                    .character
-                    .effective(&self.content)
+                    .effective(&self.content, self.now)
                     .expect("validated player equipment and base stats")[0];
                 let amount = (cap - p.character.hp).clamp(0, AMOUNT);
                 if amount == 0 {
@@ -205,13 +226,19 @@ impl World {
             return Ok(());
         }
         let position = p.pos;
-        for q in self.players.values_mut().filter(|q| {
+        let mut healed = Vec::new();
+        for (id, q) in self.players.iter_mut().filter(|(_, q)| {
             ready(q)
                 && q.pos.distance(position) < range
                 && q.conditions(self.now) & crate::condition::bit(crate::condition::SICK) == 0
         }) {
-            let cap = q.character.effective(&self.content)?[0];
+            let cap = q.effective(&self.content, self.now)?[0];
+            let before = q.character.hp;
             q.character.hp = (q.character.hp + amount).min(cap);
+            healed.push((*id, q.character.hp - before));
+        }
+        for (target, amount) in healed {
+            self.consumable_restored(target, amount, 0xff00ff00);
         }
         for q in self
             .players
@@ -248,7 +275,7 @@ impl World {
             .map(|(id, q)| {
                 Ok((
                     *id,
-                    (q.character.effective(&self.content)?[0] - q.character.hp)
+                    (q.effective(&self.content, self.now)?[0] - q.character.hp)
                         .max(0)
                         .min(amount),
                 ))
@@ -268,11 +295,12 @@ impl World {
             if *amount > 0 {
                 let mut out = Writer::new();
                 out.i32(*target).utf(&format!("+{amount}")).u32(0xff00ff00);
-                for p in self
-                    .players
-                    .values()
-                    .filter(|p| ready(p) && p.known.contains(target))
-                {
+                // Known includes distant minimap peers, not just observers of local healing.
+                for p in self.players.values().filter(|p| {
+                    ready(p)
+                        && p.known.contains(target)
+                        && p.pos.distance(self.players[target].pos) <= 20.
+                }) {
                     send(p, wire::NOTIFICATION, out.0.clone());
                     send(p, wire::SHOW_EFFECT, effect(1, *target, position));
                 }
@@ -281,7 +309,7 @@ impl World {
         for p in self
             .players
             .values()
-            .filter(|p| ready(p) && p.known.contains(&id))
+            .filter(|p| ready(p) && p.known.contains(&id) && p.pos.distance(position) <= 20.)
         {
             send(p, wire::SHOW_EFFECT, effect(5, id, Pos { x: range, y: 0. }));
         }
