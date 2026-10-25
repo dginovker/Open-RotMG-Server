@@ -1,18 +1,20 @@
 # Gameplay bots: vision and research
 
-The three-Wizard shore prototype is deployed. The selected combat and cooperative Priest-adventuring extension below is an unmerged candidate, not the production population.
+PR32's crews and PR62's inland progression are merged. Source availability is not a deployment receipt.
 
 The two video reports record observations and limits; `research/decision-spike.md` records the earlier offline experiment.
 
 ## Local autonomous crews
 
-Run `./run.sh 18923 --release`, then enter the Realm normally. Mossy leads Bayleaf/Trellis; Reed leads Juniper/Bramble. Profiles weigh recovery, resources and companions differently. They use restricted observations and ordinary movement, combat, inventory, XP, teleport and transfer rules. Uninvited humans are not permanent anchors. Native local chat `Trellis follow me` requests a temporary follow while the sender is visible.
+Run `./run.sh 18923 --release`: no fixed crews. Visible needs trigger invitations requiring actual acceptance. Temporary pairs survive travel but end on death. Account lock lists remember shared clears, not inventory or positions. LLM use is optional; failures never publish invitations or fake acceptance.
 
 Wizards predict visible projectile paths, lead an observed target, kite within weapon range, cast equipped spells and commit to recovery. Crews remember recent contacts, explore reachable known terrain, revisit observed Realm hunting grounds and respond to Pirate Cave calls. Visible crewmates regroup through normal teleports; separated crews can arrange a Nexus meeting through public chat. Priests cast equipped tomes for actual nearby injury, MP and accepted cooldowns.
 
-This candidate inherits main's default-on startup; `--no-shore-bots` or explicit `"shore_bots": false` disables it. Reserve seven slots for six bots and a human; QA control remains separate. Living saves resume unchanged. After committed permanent death, a fresh character receives normal starter gear; Bayleaf/Juniper choose Priest only if that same account earned its Wizard-level-five unlock. Dead inventory is never inherited. Trade negotiation and language services remain outside this slice.
+Bots start by default; `--no-shore-bots` or explicit `"shore_bots": false` disables it. Reserve at least twenty-one slots for twenty bots and a human; QA control remains separate. Living saves resume unchanged. After committed permanent death, a fresh character receives normal starter gear; Triceps/Kadabu choose Priest only if that same account earned its Wizard-level-five unlock. Dead inventory is never inherited.
 
-Main-based campaigns verify separate crews and a whole-crew Cave clear/ordinary return. Earlier campaigns earned both Priests, received peer healing and preserved permanent-death/restart continuity. Native footage shows combat, healing and recovery. Fixtures and one paired combat run do not establish causal survival/accuracy superiority or historical fidelity.
+Ordinary crews earned Snake Pit clears and returns. Prepared full-backpack clears verify reward exchange and consumption; native media is prepared.
+
+Nemotron defaults off. Enable `--bot-llm` with server-only `AI_GATEWAY_API_KEY`: nearby public chat creates validated, two-minute, same-world follow/wait/resume/part agreements. Missing keys fail startup; provider errors produce private system notices, never fake success.
 
 ## Approved north star
 
@@ -86,7 +88,7 @@ The next recommendation is a bounded partial-knowledge/time experiment, not anot
 - **Behavior:** danger versus loot, full inventory, lost leader, declined invitation, silent player, blocked route, death during an interaction, and realistic novice/veteran differences. Expect coherent mistakes, not universal perfect survival.
 - **Population:** controlled game-clock runs across multiple seeds; check stuck actors, synchronized routines, repetitive chat, vanished groups, item creation and population drift. Control event ordering and persistence completions; a seed alone is insufficient for full-system replay.
 - **Performance:** mixed human/bot load against the actual hosting limits; measure tail tick duration, queue pressure, saves and any language costs. No unverified 85-player promise.
-- **Presentation:** normal Ruffle gameplay at real speed. Before/after shots show the same area empty versus inhabited; a 15-second canvas-only demo shows distinct movement, combat and a meaningful interaction. A longer uncut session tests repetition. No overlays substituting for native avatars/chat.
+- **Presentation:** normal Ruffle gameplay at real speed. Before/after shots show the same area empty versus inhabited. A longer gameplay session tests repetition. No overlays substituting for native avatars/chat.
 - **Feel:** compare unseen scenarios with reserved historical examples and get user review. Passing mechanical tests does not prove believable people.
 
 Log meaningful decision changes with actor, observation/trigger, chosen goal/action and rejection reason. Retain enough clock/input/randomness information to reproduce a failure without generating a giant per-tick diary.
