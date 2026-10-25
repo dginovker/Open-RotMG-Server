@@ -12,12 +12,47 @@ pub struct Diagnostics {
     pub binary_sha256: String,
     source_revision: Option<String>,
     browsers: Mutex<HashMap<String, std::sync::Weak<Mutex<Browser>>>>,
-    budgets: Mutex<HashMap<i32, Instant>>,
-    files: Mutex<BTreeSet<String>>,
+    files: Mutex<Reports>,
+    drops: Mutex<HashMap<i32, Value>>,
+    anonymous_reports: Mutex<HashMap<IpAddr, Instant>>,
+}
+// Players report after reconnecting, so a dropped connection must outlive it and any deploy restart: https://github.com/OpenRotMG/Open-RotMG-Server/issues/469
+const DROP_WINDOW_MS: u64 = 600_000;
+const DROPS: &str = "recent-drops.state";
+fn unix_ms() -> u64 {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    u64::try_from(now.expect("system clock predates Unix epoch").as_millis())
+        .expect("unix time fits u64")
+}
+fn drop_age(drop: &Value) -> u64 {
+    unix_ms().saturating_sub(
+        drop["at_unix_ms"]
+            .as_u64()
+            .expect("validated drop timestamp"),
+    )
+}
+#[derive(Default)]
+struct Reports {
+    pending: BTreeSet<String>,
+}
+fn note_progress(report: &Value) -> Result<(usize, usize)> {
+    let Some(notes) = report.get("notes") else {
+        return Ok((0, 0));
+    };
+    let total = notes.as_array().context("invalid stored bug notes")?.len();
+    let through = usize::try_from(
+        report["delivery"]["notes_through"]
+            .as_u64()
+            .context("invalid bug note progress")?,
+    )?;
+    ensure!(through <= total && total <= 32, "invalid bug note progress");
+    Ok((through, total))
 }
 #[derive(Default)]
 pub struct Browser {
     samples: VecDeque<(Instant, BrowserSample)>,
+    pub reports: Option<mpsc::Sender<WebReport>>,
+    last_report: Option<Instant>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -71,7 +106,7 @@ impl Diagnostics {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
         }
-        let mut pending = BTreeSet::new();
+        let mut pending = Reports::default();
         for entry in std::fs::read_dir(&root)? {
             let path = entry?.path();
             if path.extension().is_some_and(|v| v == "json") {
@@ -83,13 +118,25 @@ impl Diagnostics {
                 );
                 match report["delivery"]["status"].as_str() {
                     Some("pending") => {
-                        pending.insert(id.into());
+                        pending.pending.insert(id.into());
                     }
                     Some("delivered") => {}
                     _ => bail!("invalid stored bug delivery state"),
                 }
+                note_progress(&report)?;
             }
         }
+        let drops: HashMap<i32, Value> = match std::fs::read(root.join(DROPS)) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).context("invalid stored disconnect diagnostics")?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(e.into()),
+        };
+        ensure!(
+            drops.values().all(|d| d["at_unix_ms"].is_u64()),
+            "stored disconnect diagnostics lack a timestamp"
+        );
         let executable = std::env::current_exe()?;
         let source_revision = match std::fs::read_to_string(executable.with_file_name("REVISION")) {
             Ok(value) => {
@@ -108,9 +155,25 @@ impl Diagnostics {
             source_revision,
             binary_sha256: format!("{:x}", Sha256::digest(std::fs::read(executable)?)),
             browsers: Mutex::default(),
-            budgets: Mutex::default(),
             files: Mutex::new(pending),
+            drops: Mutex::new(drops),
+            anonymous_reports: Mutex::default(),
         })
+    }
+    pub(super) fn previous_drop(&self, account: i32) -> Value {
+        let drops = self.drops.lock().expect("drop diagnostics poisoned");
+        let drop = drops.get(&account).filter(|d| drop_age(d) < DROP_WINDOW_MS);
+        drop.map_or(Value::Null, |d| {
+            let mut d = d.clone();
+            d["age_ms"] = json!(drop_age(&d));
+            d
+        })
+    }
+    fn note_drop(&self, account: i32, drop: Value) -> Result<()> {
+        let mut drops = self.drops.lock().expect("drop diagnostics poisoned");
+        drops.retain(|_, d| drop_age(d) < DROP_WINDOW_MS);
+        drops.insert(account, drop);
+        self.write_file(DROPS, &json!(*drops))
     }
     pub fn browser(&self, key: &str) -> Result<Arc<Mutex<Browser>>> {
         ensure!(
@@ -127,17 +190,6 @@ impl Diagnostics {
         browsers.insert(key.into(), Arc::downgrade(&browser));
         Ok(browser)
     }
-    fn reserve(&self, account: i32) -> Result<()> {
-        let mut budgets = self.budgets.lock().expect("diagnostics poisoned");
-        budgets.retain(|_, t| t.elapsed().as_secs() < 60);
-        ensure!(
-            !budgets.contains_key(&account),
-            "Wait one minute between bug reports."
-        );
-        ensure!(budgets.len() < 4096, "Bug report rate limit reached.");
-        budgets.insert(account, Instant::now());
-        Ok(())
-    }
     fn save(&self, report: &Value) -> Result<()> {
         let mut pending = self.files.lock().expect("diagnostics poisoned");
         ensure!(
@@ -145,17 +197,105 @@ impl Diagnostics {
             "Bug report storage full; notify an administrator."
         );
         self.write(report)?;
-        pending.insert(report["id"].as_str().context("missing report ID")?.into());
+        pending
+            .pending
+            .insert(report["id"].as_str().context("missing report ID")?.into());
         Ok(())
     }
+    fn next(&self) -> Result<Option<Value>> {
+        let mut files = self.files.lock().expect("diagnostics poisoned");
+        while let Some(id) = files.pending.first().cloned() {
+            let mut report: Value =
+                serde_json::from_slice(&std::fs::read(self.root.join(format!("{id}.json")))?)?;
+            if report["delivery"]["status"] == "pending" {
+                let (through, total) = note_progress(&report)?;
+                if through < total && report["delivery"]["note_batch"].is_null() {
+                    // A retry must identify the same comment even when more details arrive during publication.
+                    report["delivery"]["note_batch"] = json!({"from":through+1,"through":total});
+                    self.write(&report)?;
+                }
+                report
+                    .as_object_mut()
+                    .expect("report object")
+                    .remove("screenshot");
+                return Ok(Some(report));
+            }
+            ensure!(
+                report["delivery"]["status"] == "delivered",
+                "invalid stored bug delivery state"
+            );
+            files.pending.remove(&id);
+        }
+        Ok(None)
+    }
+    fn acknowledge(&self, id: &str, receipt: &Receipt) -> Result<Option<(i32, i32, String)>> {
+        ensure!(valid_id(id), "invalid bug report ID");
+        receipt.validate()?;
+        let mut files = self.files.lock().expect("diagnostics poisoned");
+        let mut report: Value =
+            serde_json::from_slice(&std::fs::read(self.root.join(format!("{id}.json")))?)?;
+        let notify =
+            receipt.target == "issue_number" && report["delivery"]["issue_number"].is_null();
+        if receipt.target == "notes" {
+            let through = receipt.through.context("missing bug note receipt range")?;
+            let (previous, _) = note_progress(&report)?;
+            if through == previous {
+                ensure!(
+                    report["delivery"]["note_comment_id"] == receipt.id,
+                    "conflicting bug note receipt"
+                );
+                return Ok(None);
+            }
+            let batch = &report["delivery"]["note_batch"];
+            ensure!(
+                batch["from"] == previous + 1 && batch["through"] == through,
+                "conflicting bug note receipt range"
+            );
+            ensure!(
+                through > previous && through <= note_progress(&report)?.1,
+                "invalid bug note receipt range"
+            );
+            report["delivery"]["notes_through"] = json!(through);
+            report["delivery"]["note_comment_id"] = json!(receipt.id);
+            report["delivery"]["note_batch"] = Value::Null;
+        } else {
+            ensure!(
+                report["delivery"][&receipt.target].is_null()
+                    || report["delivery"][&receipt.target] == receipt.id,
+                "conflicting delivery receipt"
+            );
+            report["delivery"][&receipt.target] = json!(receipt.id);
+        }
+        let (through, total) = note_progress(&report)?;
+        let complete = through == total
+            && ["public_message_id", "issue_number"]
+                .iter()
+                .all(|key| report["delivery"][*key].is_string());
+        report["delivery"]["status"] = json!(if complete { "delivered" } else { "pending" });
+        self.write(&report)?;
+        if complete {
+            files.pending.remove(id);
+        } else {
+            files.pending.insert(id.into());
+        }
+        tracing::info!(report_id=%id, target=%receipt.target, external_id=%receipt.id, notes_through=through, "bug report delivery acknowledged");
+        Ok(if notify {
+            report_owner(&report)?.map(|(account, player)| (player, account, receipt.id.clone()))
+        } else {
+            None
+        })
+    }
     fn write(&self, report: &Value) -> Result<()> {
-        use std::io::Write;
         let id = report["id"].as_str().context("missing report ID")?;
         ensure!(valid_id(id), "invalid report ID");
-        let path = self.root.join(format!("{id}.json"));
+        self.write_file(&format!("{id}.json"), report)
+    }
+    fn write_file(&self, name: &str, value: &Value) -> Result<()> {
+        use std::io::Write;
+        let path = self.root.join(name);
         let temp = self
             .root
-            .join(format!("{id}-{:016x}.tmp", rand::random::<u64>()));
+            .join(format!("{name}-{:016x}.tmp", rand::random::<u64>()));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -164,7 +304,7 @@ impl Diagnostics {
             options.mode(0o600);
         }
         let mut file = options.open(&temp)?;
-        file.write_all(&serde_json::to_vec_pretty(report)?)?;
+        file.write_all(&serde_json::to_vec_pretty(value)?)?;
         file.sync_all()?;
         std::fs::rename(temp, path)?;
         std::fs::File::open(&self.root)?.sync_all()?;
@@ -174,8 +314,29 @@ impl Diagnostics {
 fn valid_id(id: &str) -> bool {
     id.len() == 24 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
+struct ConnectionId(u64);
+impl Default for ConnectionId {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+pub struct CommandSample {
+    pub packet: u8,
+    pub queued: std::time::Duration,
+    pub handling: std::time::Duration,
+    pub queue_before: usize,
+    pub queue_after: usize,
+    pub failed: bool,
+    pub requests: crate::performance::Requests,
+}
 #[derive(Default)]
 pub struct ConnectionDiagnostics {
+    connection_id: ConnectionId,
+    pub world: Option<i32>,
+    slow_commands: VecDeque<(Instant, Value)>,
+    slowest_handler: Option<(Instant, Value)>,
+    slowest_queue: Option<(Instant, Value)>,
     pub user_agent: Option<String>,
     pub browser: Option<Arc<Mutex<Browser>>>,
     pending: BTreeMap<i32, Instant>,
@@ -189,8 +350,50 @@ pub struct ConnectionDiagnostics {
     pub expired_pings: u64,
     pub unmatched_pongs: u64,
     started: Option<Instant>,
+    last_processed: Option<(Instant, u8)>,
+    last_move: Option<Instant>,
+    last_update_ack: Option<Instant>,
+    pub last_socket_send: Option<Instant>,
 }
 impl ConnectionDiagnostics {
+    pub fn handled(&mut self, sample: CommandSample) {
+        let queue_ms = sample.queued.as_secs_f64() * 1000.;
+        let handler_ms = sample.handling.as_secs_f64() * 1000.;
+        let max_handler = handler_ms > self.max_handler_ms;
+        let max_queue = queue_ms > self.max_input_queue_ms;
+        let slow = handler_ms >= 50. || queue_ms >= 50. || sample.failed;
+        self.max_handler_ms = self.max_handler_ms.max(handler_ms);
+        self.max_input_queue_ms = self.max_input_queue_ms.max(queue_ms);
+        if !slow && !max_handler && !max_queue {
+            return;
+        }
+        let at = Instant::now();
+        let event = json!({"completed_unix_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("system clock predates Unix epoch").as_millis(),
+            "packet":sample.packet,"world_id":self.world,"queue_wait_ms":queue_ms,"handler_wall_ms":handler_ms,
+            "input_queue_before":sample.queue_before,"input_queue_after":sample.queue_after,"failed":sample.failed,"world_requests":sample.requests.snapshot()});
+        if max_handler {
+            self.slowest_handler = Some((at, event.clone()));
+        }
+        if max_queue {
+            self.slowest_queue = Some((at, event.clone()));
+        }
+        if slow {
+            self.slow_commands.push_back((at, event));
+            while self.slow_commands.len() > 8 {
+                self.slow_commands.pop_front();
+            }
+        }
+    }
+    pub fn processed(&mut self, packet: u8) {
+        let now = Instant::now();
+        self.last_processed = Some((now, packet));
+        if packet == wire::MOVE {
+            self.last_move = Some(now);
+        }
+        if packet == wire::UPDATE_ACK {
+            self.last_update_ack = Some(now);
+        }
+    }
     pub fn sent(&mut self, serial: i32) {
         let now = Instant::now();
         self.started.get_or_insert(now);
@@ -230,7 +433,17 @@ impl ConnectionDiagnostics {
                 .map(|(t, sample)| json!({"age_ms": t.elapsed().as_millis(), "sample": sample}))
                 .collect::<Vec<_>>()
         });
-        json!({"user_agent": self.user_agent, "browser_samples": browser, "rtt_samples": samples,
+        let observation = |(at, event): &(Instant, Value)| json!({"completed_age_ms":at.elapsed().as_secs_f64()*1000.,"event":event});
+        json!({"connection_id":self.connection_id.0,"process_id":std::process::id(),"world_id":self.world,
+            "slow_commands":self.slow_commands.iter().map(observation).collect::<Vec<_>>(),
+            "slowest_handler":self.slowest_handler.as_ref().map(observation),"slowest_input_queue":self.slowest_queue.as_ref().map(observation),
+            "user_agent": self.user_agent, "browser_samples": browser, "rtt_samples": samples,
+            "last_move_received_age_ms":self.last_move.map(|at|at.elapsed().as_secs_f64()*1000.),
+            "last_update_ack_received_age_ms":self.last_update_ack.map(|at|at.elapsed().as_secs_f64()*1000.),
+            "last_processed_packet":self.last_processed.map(|(_,id)|id),
+            "last_processed_age_ms":self.last_processed.map(|(at,_)|at.elapsed().as_secs_f64()*1000.),
+            "last_queued_packet_send_age_ms":self.last_socket_send.map(|at|at.elapsed().as_secs_f64()*1000.),
+            "last_pong_age_ms":self.replies.back().map(|(at,_)|at.elapsed().as_secs_f64()*1000.),
             "pending_ping_ages_ms": self.pending.values().map(|t| t.elapsed().as_millis()).collect::<Vec<_>>(),
             "expired_pings_session": self.expired_pings, "unmatched_pongs_session": self.unmatched_pongs,
             "game_commands_in_session": self.packets_in, "queued_packets_out_session": self.packets_out,
@@ -249,12 +462,23 @@ fn summary(values: impl Iterator<Item = f64>) -> Value {
     };
     json!({"samples": values.len(), "median": percentile(0.5), "p95": percentile(0.95), "max": values.last()})
 }
+fn command_observation(value: &Value) -> Value {
+    if value.is_null() {
+        return Value::Null;
+    }
+    let e = &value["event"];
+    let r = &e["world_requests"];
+    json!({"completed_age_ms":value["completed_age_ms"].as_f64(),"event":{
+        "completed_unix_ms":e["completed_unix_ms"].as_u64(),"packet":e["packet"].as_u64(),"world_id":e["world_id"].as_i64(),
+        "queue_wait_ms":e["queue_wait_ms"].as_f64(),"handler_wall_ms":e["handler_wall_ms"].as_f64(),
+        "input_queue_before":e["input_queue_before"].as_u64(),"input_queue_after":e["input_queue_after"].as_u64(),"failed":e["failed"].as_bool(),
+        "world_requests":{"calls":r["calls"].as_u64(),"completed":r["completed"].as_u64(),"send_wait_sum_ms":r["send_wait_sum_ms"].as_f64(),
+            "queue_wait_sum_ms":r["queue_wait_sum_ms"].as_f64(),"work_wall_sum_ms":r["work_wall_sum_ms"].as_f64(),"work_cpu_sum_ms":r["work_cpu_sum_ms"].as_f64(),"round_trip_sum_ms":r["round_trip_sum_ms"].as_f64()}}})
+}
 fn public_diagnostics(report: &Value) -> Value {
     let connection = &report["connection"];
     let rtt = connection["rtt_samples"].as_array().expect("RTT samples");
-    let ticks = report["context"]["recent_ticks"]
-        .as_array()
-        .expect("tick samples");
+    let ticks = report["context"]["recent_ticks"].as_array();
     let browser: Vec<_> = connection["browser_samples"]
         .as_array()
         .into_iter()
@@ -278,13 +502,13 @@ fn public_diagnostics(report: &Value) -> Value {
     let mut history = Vec::new();
     for bucket in 0..24 {
         let within = |v: &&Value| v["age_ms"].as_u64().is_some_and(|age| age / 5000 == bucket);
-        let tick_values: Vec<_> = ticks.iter().filter(within).collect();
+        let tick_values: Vec<_> = ticks.into_iter().flatten().filter(within).collect();
         let ping_values: Vec<_> = rtt.iter().filter(within).collect();
         if !tick_values.is_empty() || !ping_values.is_empty() {
             history.push(json!({"seconds_before_report": [bucket * 5, (bucket + 1) * 5],
                 "game_rtt_ms": summary(ping_values.iter().filter_map(|v| v["rtt_ms"].as_f64())),
-                "tick_ms": summary(tick_values.iter().filter_map(|v| v["execution_us"].as_f64().map(|n| n / 1000.0))),
-                "scheduling_delay_ms": summary(tick_values.iter().filter_map(|v| v["scheduling_lateness_us"].as_f64().map(|n| n / 1000.0)))}));
+                "tick_ms": ticks.map(|_|summary(tick_values.iter().filter_map(|v| v["execution_us"].as_f64().map(|n| n / 1000.0)))),
+                "scheduling_delay_ms": ticks.map(|_|summary(tick_values.iter().filter_map(|v| v["scheduling_lateness_us"].as_f64().map(|n| n / 1000.0))))}));
         }
     }
     let browser_history: Vec<_> = browser.iter().map(|v| {
@@ -323,18 +547,70 @@ fn public_diagnostics(report: &Value) -> Value {
             "website": revision("website", 40), "client": revision("client", 40), "runtime": revision("runtime", 16)},
         "environment": {"browser": browser_family, "os": os_family},
         "game_rtt_ms": summary(rtt.iter().filter_map(|v| v["rtt_ms"].as_f64())),
-        "tick_ms": summary(ticks.iter().filter_map(|v| v["execution_us"].as_f64().map(|n| n / 1000.0))),
-        "scheduling_delay_ms": summary(ticks.iter().filter_map(|v| v["scheduling_lateness_us"].as_f64().map(|n| n / 1000.0))),
+        "world_context_status":if ticks.is_some() {"available"}else if report["context"].is_null() {"unavailable"}else{"invalid"},
+        "tick_ms": ticks.map(|t|summary(t.iter().filter_map(|v| v["execution_us"].as_f64().map(|n| n / 1000.0)))),
+        "scheduling_delay_ms": ticks.map(|t|summary(t.iter().filter_map(|v| v["scheduling_lateness_us"].as_f64().map(|n| n / 1000.0)))),
         "visible_frame_gap_ms": summary(visible.iter().filter_map(|v| v["sample"]["max_frame_gap_ms"].as_f64())),
-        "connection": {"max_socket_send_ms": connection["max_socket_send_ms_session"], "max_handler_ms": connection["max_handler_ms_session"],
+        "native_acknowledgements":{
+            "weapon_tick_records":report["context"]["native_acknowledgements"]["weapon_tick_records"],"goto":report["context"]["native_acknowledgements"]["goto"],
+            "shoot":report["context"]["native_acknowledgements"]["shoot"],"oldest_goto_ms":report["context"]["native_acknowledgements"]["oldest_goto_ms"],
+            "oldest_shoot_pause_excluding_ms":report["context"]["native_acknowledgements"]["oldest_shoot_pause_excluding_ms"],"last_update_ack_received_age_ms":connection["last_update_ack_received_age_ms"]},
+
+        "connection": {"connection_id":connection["connection_id"].as_u64(),"process_id":connection["process_id"].as_u64(),"world_id":connection["world_id"].as_i64(),
+            "slow_commands":connection["slow_commands"].as_array().map(|a|a.iter().rev().take(8).rev().map(command_observation).collect::<Vec<_>>()),
+            "slowest_handler":command_observation(&connection["slowest_handler"]),"slowest_input_queue":command_observation(&connection["slowest_input_queue"]),
+            "last_move_received_age_ms":connection["last_move_received_age_ms"],"last_processed_packet":connection["last_processed_packet"],"last_processed_age_ms":connection["last_processed_age_ms"],
+            "last_queued_packet_send_age_ms":connection["last_queued_packet_send_age_ms"],"last_pong_age_ms":connection["last_pong_age_ms"],
+            "max_socket_send_ms": connection["max_socket_send_ms_session"], "max_handler_ms": connection["max_handler_ms_session"],
             "max_input_queue_ms": connection["max_input_queue_ms_session"], "outgoing_queue_high_water": connection["observed_outgoing_queue_high_water_session"],
             "expired_pings": connection["expired_pings_session"], "pending_ping_ages_ms": connection["pending_ping_ages_ms"]},
         "capture_window_seconds": 120,
         "population": {"world_players": report["context"]["world_players"], "world_entities": report["context"]["world_entities"], "world_projectiles": report["context"]["world_projectiles"],
             "total_players": report["context"]["total_players"], "total_worlds": report["context"]["total_worlds"]},
         "history": history, "browser_history": browser_history,
-        "units": "Timings in milliseconds; history uses five-second buckets. RTT includes game/client/server processing. Animation-frame gaps are not game FPS. Null means unavailable."})
+        "units": "Timings in milliseconds; history uses five-second buckets. RTT includes game/client/server processing. Animation-frame gaps are not game FPS. Null means unavailable. Command handler times include awaits/descheduling; world-request sums may overlap and are not exclusive handler CPU."})
 }
+pub(super) async fn disconnect(
+    a: &App,
+    player: i32,
+    dropped_account: Option<i32>,
+    connection: &ConnectionDiagnostics,
+    transport: Value,
+) {
+    // Capture before departure removes the player; never create a public bug report or gold reward.
+    let mut report = json!({"created_at_unix_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock before epoch").as_millis(),
+        "server_source_revision":a.diagnostics.source_revision,"server_binary_sha256":a.diagnostics.binary_sha256,
+        "protocol_build":"123.5.1","connection":connection.snapshot()});
+    let started = Instant::now();
+    let context = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        a.world.directory(move |d| d.bug_context(player)),
+    )
+    .await;
+    let context_request_ms = started.elapsed().as_secs_f64() * 1000.;
+    match context {
+        Ok(Ok(context)) => {
+            report["context"] = context;
+            tracing::info!(player,transport=%transport,context_request_ms,diagnostics=%public_diagnostics(&report),"game disconnect diagnostics");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(player,transport=%transport,context_request_ms,%error,diagnostics=%public_diagnostics(&report),"game disconnect diagnostics unavailable")
+        }
+        Err(error) => {
+            tracing::warn!(player,transport=%transport,context_request_ms,%error,diagnostics=%public_diagnostics(&report),"game disconnect diagnostics deadline exceeded")
+        }
+    }
+    if let Some(account) = dropped_account {
+        let drop = json!({"at_unix_ms": unix_ms(), "transport": transport, "diagnostics": public_diagnostics(&report)});
+        let diagnostics = a.diagnostics.clone();
+        match tokio::task::spawn_blocking(move || diagnostics.note_drop(account, drop)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!(account, %error, "disconnect diagnostics not saved"),
+            Err(error) => tracing::error!(account, %error, "disconnect diagnostics writer failed"),
+        }
+    }
+}
+
 pub async fn attachment(State(a): State<App>, Path(id): Path<String>) -> Response {
     if !valid_id(&id) {
         return StatusCode::NOT_FOUND.into_response();
@@ -368,53 +644,286 @@ pub async fn attachment(State(a): State<App>, Path(id): Path<String>) -> Respons
     }
 }
 
+#[cfg(test)]
+#[path = "diagnostics_tests.rs"]
+mod tests;
+
 pub async fn report(
     a: &App,
     account: i32,
     player: i32,
     message: &str,
     connection: &ConnectionDiagnostics,
-) -> Result<()> {
+    screenshot: Option<String>,
+) -> Result<String> {
+    save_report(
+        a,
+        Some((account, player)),
+        message,
+        connection.snapshot(),
+        screenshot,
+    )
+    .await
+}
+fn report_owner(report: &Value) -> Result<Option<(i32, i32)>> {
+    let account: Option<i32> = serde_json::from_value(
+        report
+            .get("account_id")
+            .context("missing report account")?
+            .clone(),
+    )?;
+    match account {
+        Some(account) => Ok(Some((
+            account,
+            serde_json::from_value(report["context"]["player_id"].clone())?,
+        ))),
+        None => {
+            ensure!(
+                report.get("context") == Some(&Value::Null),
+                "anonymous report has game context"
+            );
+            Ok(None)
+        }
+    }
+}
+async fn save_report(
+    a: &App,
+    owner: Option<(i32, i32)>,
+    message: &str,
+    connection: Value,
+    screenshot: Option<String>,
+) -> Result<String> {
     ensure!(
         a.discord_link_token.is_some(),
         "Discord bug reporting is not configured."
     );
     ensure!(
         !message.trim().is_empty(),
-        "Usage: /bug <description>. Reports are public; do not include personal information."
+        "Describe the bug before submitting. Reports are public; do not include personal information."
     );
     ensure!(
-        message.chars().count() <= 500,
-        "Bug message is too long (maximum 500 characters)."
+        message.chars().count() <= 4000,
+        "Bug message is too long (maximum 4000 characters)."
     );
-    a.diagnostics.reserve(account)?;
     let requested = Instant::now();
-    let context = a.world.directory(move |d| d.bug_context(player)).await?;
+    let context = match owner {
+        Some((_, player)) => a.world.directory(move |d| d.bug_context(player)).await?,
+        None => Value::Null,
+    };
     let id = {
         use rand::RngCore;
         let mut bytes = [0u8; 12];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
         bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
-    let mut report = json!({"schema": 2, "id": id, "created_at_unix_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis(),
-        "delivery": {"status": "pending"}, "message_untrusted": message, "account_id": account,
+    let reporter_name = if owner.is_some() {
+        context["player_name"]
+            .as_str()
+            .context("bug reporter name missing")?
+    } else {
+        "Website visitor (no character connected)"
+    };
+    let mut report = json!({"schema": 3, "reporter_name": reporter_name, "id": id, "created_at_unix_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis(),
+        "delivery": {"status": "pending", "notes_through": 0}, "notes": [], "message_untrusted": message, "account_id": owner.map(|(account, _)| account),
         "server_binary_sha256": a.diagnostics.binary_sha256, "server_source_revision": a.diagnostics.source_revision, "protocol_build": "123.5.1", "context": context,
         "server_uptime_ms": a.started.elapsed().as_millis(), "configured_player_cap": a.max_players,
-        "context_request_ms": requested.elapsed().as_secs_f64() * 1000.0, "connection": connection.snapshot(),
+        "context_request_ms": requested.elapsed().as_secs_f64() * 1000.0, "connection": connection,
         "capture_window_seconds": 120});
     report["diagnostics"] = public_diagnostics(&report);
+    report["diagnostics"]["previous_drop"] = owner.map_or(Value::Null, |(account, _)| {
+        a.diagnostics.previous_drop(account)
+    });
     report["diagnostics_url"] = json!(format!(
         "{}/api/bug-reports/{id}/diagnostics.json",
         a.origin
     ));
+    if let Some(screenshot) = screenshot {
+        report["screenshot"] = json!(screenshot);
+        report["screenshot_url"] =
+            json!(format!("{}/api/bug-reports/{id}/screenshot.png", a.origin));
+    }
     let object = report.as_object_mut().expect("report object");
     object.remove("connection");
-    object.insert("context".into(), json!({"player_id": player}));
+    object.insert(
+        "context".into(),
+        owner.map_or(Value::Null, |(_, player)| json!({"player_id": player})),
+    );
     let diagnostics = a.diagnostics.clone();
     tokio::task::spawn_blocking(move || diagnostics.save(&report)).await??;
-    tracing::info!(report_id=%id, account, player, "bug report saved; awaiting Discord delivery");
-    Ok(())
+    tracing::info!(report_id=%id, ?owner, "bug report saved; awaiting Discord delivery");
+    Ok(id)
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebReportInput {
+    message: String,
+    screenshot: String,
+}
+pub struct WebReport {
+    input: WebReportInput,
+    reply: tokio::sync::oneshot::Sender<Result<String>>,
+}
+fn screenshot_png(encoded: &str) -> Result<Vec<u8>> {
+    use base64::Engine;
+    ensure!(encoded.len() <= 1_400_000, "Game screenshot exceeds 1 MiB.");
+    let png = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    ensure!(
+        png.len() >= 33
+            && png.len() <= 1024 * 1024
+            && png.starts_with(b"\x89PNG\r\n\x1a\n")
+            && &png[12..16] == b"IHDR",
+        "Game screenshot must be a PNG of at most 1 MiB."
+    );
+    for offset in [16, 20] {
+        let dimension = u32::from_be_bytes(png[offset..offset + 4].try_into()?);
+        ensure!(
+            (1..=4096).contains(&dimension),
+            "Invalid game screenshot dimensions."
+        );
+    }
+    Ok(png)
+}
+pub async fn submit(
+    State(a): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(key): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<WebReportInput>,
+) -> Response {
+    super::hiscores::json_result(async {
+        ensure!(headers.get("origin").and_then(|v|v.to_str().ok()) == Some(a.origin.as_str()), "Bug report origin denied.");
+        ensure!(!input.message.trim().is_empty() && input.message.chars().count() <= 4000, "Describe the bug in 1–4000 characters.");
+        screenshot_png(&input.screenshot)?;
+        ensure!(key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit()), "invalid diagnostic session");
+        let browser = a.diagnostics.browsers.lock().expect("diagnostics poisoned").get(&key).and_then(|b|b.upgrade());
+        let connected = browser.as_ref().is_some_and(|b| b.lock().expect("browser poisoned").reports.as_ref().is_some_and(|s| !s.is_closed()));
+        if !connected {
+            // Anonymous input has no game authority; bound it by trusted peer IP: https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html#http-return-code
+            let ip = super::request_ip(&a, &headers, peer)?;
+            {
+                let mut recent = a.diagnostics.anonymous_reports.lock().expect("anonymous report rates poisoned");
+                recent.retain(|_, at| at.elapsed().as_secs() < 30);
+                ensure!(!recent.contains_key(&ip), "Wait 30 seconds between bug reports.");
+                ensure!(recent.len() < 4096, "Anonymous report limit reached; try later.");
+                recent.insert(ip, Instant::now());
+            }
+            let connection = json!({"user_agent":headers.get("user-agent").map(|v| v.to_str()).transpose()?,"rtt_samples":[],"browser_samples":[]});
+            let id = save_report(&a, None, &input.message, connection, Some(input.screenshot)).await?;
+            return Ok(json!({"id":id}));
+        }
+        let browser = browser.context("connected diagnostic session missing")?;
+        let (reply, response) = tokio::sync::oneshot::channel();
+        {
+            let mut browser = browser.lock().expect("browser poisoned");
+            ensure!(browser.last_report.is_none_or(|t|t.elapsed().as_secs() >= 30), "Wait 30 seconds between bug reports.");
+            browser.reports.as_ref().context("No game connection for this tab.")?.try_send(WebReport {input,reply}).context("Game connection is busy or closed; report was not queued.")?;
+            browser.last_report = Some(Instant::now());
+        }
+        let id = tokio::time::timeout(std::time::Duration::from_secs(30), response).await.context("Submission outcome unknown; check the bug backlog before retrying.")?.context("Game disconnected before confirming submission; check the backlog before retrying.")??;
+        Ok(json!({"id":id}))
+    }.await)
+}
+pub(super) async fn from_session(a: &App, session: &Session, request: WebReport) {
+    // Resolve identity on the owning game task, not browser-supplied IDs: https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html
+    let result = async {
+        ensure!(
+            !session.reconnecting,
+            "World transfer in progress; try again when connected."
+        );
+        let account = session
+            .account
+            .as_ref()
+            .context("Sign into the game before reporting.")?
+            .id;
+        let player = session
+            .player
+            .context("Connect to a character before reporting.")?;
+        report(
+            a,
+            account,
+            player,
+            &request.input.message,
+            &session.diagnostics,
+            Some(request.input.screenshot),
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = &result {
+        tracing::warn!(%error, "website bug report failed");
+    }
+    let _ = request.reply.send(result);
+}
+pub async fn status(State(a): State<App>, Path(id): Path<String>) -> Response {
+    if !valid_id(&id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<Value>> {
+        let bytes = match std::fs::read(a.diagnostics.root.join(format!("{id}.json"))) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let report: Value = serde_json::from_slice(&bytes)?;
+        ensure!(report["id"] == id, "stored report identity mismatch");
+        let url = match report["delivery"].get("issue_number") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(issue)) => {
+                Receipt {
+                    target: "issue_number".into(),
+                    id: issue.clone(),
+                    through: None,
+                }
+                .validate()?;
+                Some(format!(
+                    "https://github.com/OpenRotMG/Open-RotMG-Server/issues/{issue}"
+                ))
+            }
+            Some(_) => bail!("invalid stored issue number"),
+        };
+        Ok(Some(json!({"url":url})))
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(value))) => ([("cache-control", "no-store")], Json(value)).into_response(),
+        Ok(Ok(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(error)) => super::error(error),
+        Err(error) => super::error(error.into()),
+    }
+}
+pub async fn screenshot(State(a): State<App>, Path(id): Path<String>) -> Response {
+    if !valid_id(&id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+        let bytes = match std::fs::read(a.diagnostics.root.join(format!("{id}.json"))) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let report: Value = serde_json::from_slice(&bytes)?;
+        report
+            .get("screenshot")
+            .map(|v| screenshot_png(v.as_str().context("Invalid stored screenshot")?))
+            .transpose()
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(png))) => (
+            [
+                ("content-type", "image/png"),
+                ("x-content-type-options", "nosniff"),
+                ("cache-control", "no-store"),
+            ],
+            png,
+        )
+            .into_response(),
+        Ok(Ok(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(e)) => error(e),
+        Err(e) => error(e.into()),
+    }
+}
+
 pub async fn browser_sample(
     State(a): State<App>,
     Path(key): Path<String>,
@@ -466,6 +975,29 @@ pub async fn browser_sample(
 pub struct Receipt {
     target: String,
     id: String,
+    through: Option<usize>,
+}
+impl Receipt {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.id.is_empty() && self.id.bytes().all(|b| b.is_ascii_digit()),
+            "invalid bug delivery receipt"
+        );
+        ensure!(
+            match self.target.as_str() {
+                "private_message_id" | "public_message_id" =>
+                    (17..=20).contains(&self.id.len()) && self.through.is_none(),
+                "issue_number" =>
+                    self.id.parse::<u32>().is_ok_and(|n| n > 0) && self.through.is_none(),
+                "notes" =>
+                    self.id.parse::<u64>().is_ok_and(|n| n > 0)
+                        && self.through.is_some_and(|n| n > 0),
+                _ => false,
+            },
+            "invalid bug delivery target or range"
+        );
+        Ok(())
+    }
 }
 pub async fn pending(
     State(a): State<App>,
@@ -476,21 +1008,7 @@ pub async fn pending(
         return error(e);
     }
     let result = tokio::task::spawn_blocking(move || -> Result<Value> {
-        let mut pending = a.diagnostics.files.lock().expect("diagnostics poisoned");
-        while let Some(id) = pending.first().cloned() {
-            let value: Value = serde_json::from_slice(&std::fs::read(
-                a.diagnostics.root.join(format!("{id}.json")),
-            )?)?;
-            if value["delivery"]["status"] == "pending" {
-                return Ok(json!({"report": value}));
-            }
-            ensure!(
-                value["delivery"]["status"] == "delivered",
-                "invalid stored bug delivery state"
-            );
-            pending.remove(&id);
-        }
-        Ok(json!({"report": null}))
+        Ok(json!({"report": a.diagnostics.next()?}))
     })
     .await;
     match result {
@@ -508,27 +1026,25 @@ pub async fn receipt(
 ) -> Response {
     let result: Result<()> = async {
         super::hiscores::authorize(&a, peer, &headers)?;
-        ensure!(valid_id(&id) && receipt.id.bytes().all(|b| b.is_ascii_digit()) && !receipt.id.is_empty(), "invalid bug delivery receipt");
-        ensure!(match receipt.target.as_str() {
-            "private_message_id" | "public_message_id" => (17..=20).contains(&receipt.id.len()),
-            "issue_number" => receipt.id.parse::<u32>().is_ok_and(|n| n > 0),
-            _ => false,
-        }, "invalid bug delivery target");
-        let world = a.world.clone();
-        let notification = tokio::task::spawn_blocking(move || -> Result<Option<(i32, i32, String)>> {
-            let mut pending = a.diagnostics.files.lock().expect("diagnostics poisoned");
-            let mut report: Value = serde_json::from_slice(&std::fs::read(a.diagnostics.root.join(format!("{id}.json")))?)?;
-            let notify = receipt.target == "issue_number" && report["delivery"]["issue_number"].is_null();
-            ensure!(report["delivery"][&receipt.target].is_null() || report["delivery"][&receipt.target] == receipt.id, "conflicting delivery receipt");
-            report["delivery"][&receipt.target] = json!(receipt.id);
-            if ["public_message_id", "issue_number"].iter().all(|key| report["delivery"][*key].is_string()) {
-                report["delivery"]["status"] = json!("delivered");
+        ensure!(valid_id(&id), "invalid bug report ID");
+        receipt.validate()?;
+        if receipt.target == "issue_number" {
+            let diagnostics = a.diagnostics.clone();
+            let (id, issue) = (id.clone(), receipt.id.clone());
+            let owner = tokio::task::spawn_blocking(move || -> Result<Option<(i32, i32)>> {
+                let report: Value = serde_json::from_slice(&std::fs::read(diagnostics.root.join(format!("{id}.json")))?)?;
+                ensure!(report["id"] == id && matches!(report["delivery"]["status"].as_str(), Some("pending" | "delivered")), "invalid stored bug report");
+                ensure!(report["delivery"]["issue_number"].is_null() || report["delivery"]["issue_number"] == issue, "conflicting delivery receipt");
+                report_owner(&report)
+            }).await??;
+            // Keep the report retryable until its once-only reward is durable.
+            if let Some((account, _)) = owner {
+                a.store.reward_first_bug(account).await?;
+                super::gold::sync(&a, account).await?;
             }
-            a.diagnostics.write(&report)?;
-            if report["delivery"]["status"] == "delivered" { pending.remove(&id); }
-            tracing::info!(report_id=%id, target=%receipt.target, external_id=%receipt.id, "bug report delivery acknowledged");
-            Ok(if notify { Some((report["context"]["player_id"].as_i64().context("missing report player")? as i32, report["account_id"].as_i64().context("missing report account")? as i32, receipt.id)) } else { None })
-        }).await??;
+        }
+        let world = a.world.clone();
+        let notification = tokio::task::spawn_blocking(move || a.diagnostics.acknowledge(&id, &receipt)).await??;
         if let Some((player, account, issue)) = notification
             && let Err(error) = world.for_player(player).call(move |w| {
                 let p = w.players.get(&player).context("reporting player disconnected")?;
@@ -542,318 +1058,5 @@ pub async fn receipt(
     match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => error(e),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn diagnostic_attachment_is_bounded_and_strictly_allowlisted() {
-        let report = json!({"created_at_unix_ms": 123, "server_source_revision": "a".repeat(40), "server_binary_sha256": "b".repeat(64), "protocol_build": "123.5.1",
-            "context": {"player_id": 12345, "world_name": "PRIVATE_WORLD", "position": {"x": 1}, "world_players": 2, "world_entities": 20, "world_projectiles": 4,
-                "recent_ticks": (0..2400).map(|i| json!({"age_ms": i*50, "execution_us": 1000, "scheduling_lateness_us": 2000})).collect::<Vec<_>>()},
-            "connection": {"user_agent": "PRIVATE_UA Chrome/123 Linux", "rtt_samples": [{"age_ms": 1000, "rtt_ms": 75}],
-                "browser_samples": [{"age_ms": 1000, "sample": {"build": r#"{"website":"PRIVATE_BUILD"}"#, "renderer": "PRIVATE_GPU", "hidden_during_interval": false, "frames": 300, "elapsed_ms": 5000, "max_frame_gap_ms": 40}}]}});
-        let attachment = public_diagnostics(&report);
-        assert_eq!(attachment["tick_ms"]["samples"], 2400);
-        assert_eq!(attachment["tick_ms"]["max"], 1.0);
-        assert_eq!(attachment["game_rtt_ms"]["median"], 75.0);
-        assert_eq!(attachment["history"].as_array().unwrap().len(), 24);
-        assert_eq!(
-            attachment["environment"],
-            json!({"browser": "Chrome", "os": "Linux"})
-        );
-        let encoded = serde_json::to_string(&attachment).unwrap();
-        for excluded in [
-            "PRIVATE_",
-            "player_id",
-            "world_name",
-            "position",
-            "user_agent",
-            "renderer",
-            "12345",
-        ] {
-            assert!(!encoded.contains(excluded), "{excluded}");
-        }
-        assert!(encoded.len() < 15000);
-    }
-    #[test]
-    fn ping_serials_are_matched_and_only_recent_samples_are_reported() {
-        let mut d = ConnectionDiagnostics::default();
-        d.sent(1);
-        d.pong(2);
-        d.pong(1);
-        d.pong(1);
-        assert_eq!(d.snapshot()["rtt_samples"].as_array().unwrap().len(), 1);
-        assert_eq!(d.unmatched_pongs, 2);
-        d.replies
-            .push_back((Instant::now() - std::time::Duration::from_secs(121), 99.0));
-        assert_eq!(d.snapshot()["rtt_samples"].as_array().unwrap().len(), 1);
-    }
-    #[tokio::test]
-    async fn native_command_spools_privately_and_receipts_survive_restart() {
-        let (root, mut a) = super::super::account_actions::tests::fixture();
-        let account = a.store.list("bug-test".into()).await.unwrap().id;
-        let character = a
-            .store
-            .create(account, a.content.get(crate::content::WIZARD).unwrap())
-            .await
-            .unwrap();
-        let (messages, mut notification_rx) = mpsc::channel(64);
-        let (notify_lost, _) = tokio::sync::watch::channel(false);
-        let player = a
-            .world
-            .call(move |w| {
-                w.enter(
-                    character,
-                    Some(crate::world::Output {
-                        packets: messages,
-                        lost: notify_lost,
-                    }),
-                )
-            })
-            .await
-            .unwrap();
-        let mut session = Session {
-            account: Some(a.claim_session(account).unwrap()),
-            player: Some(player),
-            ..Session::default()
-        };
-        session.diagnostics.user_agent = Some("PRIVATE_UA".into());
-        session.diagnostics.sent(1);
-        session.diagnostics.pong(1);
-        let (tx, mut rx) = mpsc::channel(64);
-        let (lost, _) = tokio::sync::watch::channel(false);
-        let mut text = Writer::new();
-        text.utf("/bug enemies froze");
-        handle(
-            &mut a,
-            Packet {
-                id: wire::PLAYER_TEXT,
-                body: text.0,
-            },
-            &mut session,
-            &tx,
-            &lost,
-            Instant::now(),
-        )
-        .await
-        .unwrap();
-        assert!(
-            rx.try_recv().is_err(),
-            "only issue creation should produce a success reply"
-        );
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "authorization",
-            format!("Bearer {}", "a".repeat(64)).parse().unwrap(),
-        );
-        let peer: SocketAddr = "127.0.0.1:1234".parse().unwrap();
-        let response = pending(State(a.clone()), ConnectInfo(peer), headers.clone()).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1_048_576)
-            .await
-            .unwrap();
-        let value: Value = serde_json::from_slice(&body).unwrap();
-        let report = &value["report"];
-        assert_eq!(report["message_untrusted"], "enemies froze");
-        assert!(report.get("connection").is_none());
-        assert_eq!(report["account_id"], account);
-        let id = report["id"].as_str().unwrap().to_string();
-        let public = attachment(State(a.clone()), Path(id.clone())).await;
-        assert_eq!(public.status(), StatusCode::OK);
-        let public_body = axum::body::to_bytes(public.into_body(), 100_000)
-            .await
-            .unwrap();
-        let encoded = String::from_utf8(public_body.to_vec()).unwrap();
-        for excluded in [
-            "PRIVATE_UA",
-            "account_id",
-            "player_id",
-            "position",
-            "message_untrusted",
-            "investigation",
-            "enemies froze",
-        ] {
-            assert!(!encoded.contains(excluded), "{excluded}");
-        }
-        assert!(encoded.len() < 40_000);
-        assert_eq!(
-            attachment(State(a.clone()), Path("../game.db".into()))
-                .await
-                .status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            attachment(State(a.clone()), Path("f".repeat(24)))
-                .await
-                .status(),
-            StatusCode::NOT_FOUND
-        );
-        assert!(
-            super::report(&a, account, player, "", &session.diagnostics)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("Usage: /bug")
-        );
-        assert_eq!(
-            pending(State(a.clone()), ConnectInfo(peer), HeaderMap::new())
-                .await
-                .status(),
-            StatusCode::BAD_REQUEST
-        );
-        let mut forwarded = headers.clone();
-        forwarded.insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
-        assert_eq!(
-            pending(State(a.clone()), ConnectInfo(peer), forwarded)
-                .await
-                .status(),
-            StatusCode::BAD_REQUEST
-        );
-        for (target, external_id) in [
-            ("issue_number", "42"),
-            ("public_message_id", "1559759855621898313"),
-        ] {
-            let response = receipt(
-                State(a.clone()),
-                ConnectInfo(peer),
-                Path(id.clone()),
-                headers.clone(),
-                Json(Receipt {
-                    target: target.into(),
-                    id: external_id.into(),
-                }),
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        }
-        let mut confirmed = false;
-        while let Ok(packet) = notification_rx.try_recv() {
-            if packet.id == wire::TEXT {
-                let mut text = Reader::new(&packet.body);
-                text.utf().unwrap();
-                text.i32().unwrap();
-                text.i32().unwrap();
-                text.u8().unwrap();
-                text.utf().unwrap();
-                if text.utf().unwrap()
-                    == "Reported as #42: https://github.com/OpenRotMG/Open-RotMG-Server/issues/42"
-                {
-                    confirmed = true;
-                }
-            }
-        }
-        assert!(
-            confirmed,
-            "issue receipt must notify the in-game reporting player"
-        );
-        let bad = receipt(
-            State(a.clone()),
-            ConnectInfo(peer),
-            Path(id.clone()),
-            headers.clone(),
-            Json(Receipt {
-                target: "issue_number".into(),
-                id: "43".into(),
-            }),
-        )
-        .await;
-        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
-        a.diagnostics = Arc::new(Diagnostics::open(root.join("bug-reports")).unwrap());
-        let response = pending(State(a.clone()), ConnectInfo(peer), headers).await;
-        let body = axum::body::to_bytes(response.into_body(), 1_048_576)
-            .await
-            .unwrap();
-        assert!(serde_json::from_slice::<Value>(&body).unwrap()["report"].is_null());
-        let saved: Value = serde_json::from_slice(
-            &std::fs::read(root.join("bug-reports").join(format!("{id}.json"))).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(saved["delivery"]["status"], "delivered");
-        session.account.take().unwrap().release();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-    #[tokio::test]
-    async fn browser_samples_require_origin_active_session_and_bounded_schema() {
-        let (root, a) = super::super::account_actions::tests::fixture();
-        let key = "b".repeat(32);
-        let browser = a.diagnostics.browser(&key).unwrap();
-        let sample: BrowserSample = serde_json::from_value(json!({"build": "test", "renderer": null, "renderer_status": "unavailable", "width": 800, "height": 600, "pixel_ratio": 1.5, "hidden": false, "hidden_during_interval": false, "frames": 300, "max_frame_gap_ms": 20, "long_tasks": null, "long_task_ms": null, "elapsed_ms": 5000})).unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert("origin", a.origin.parse().unwrap());
-        assert_eq!(
-            browser_sample(
-                State(a.clone()),
-                Path(key.clone()),
-                HeaderMap::new(),
-                Json(sample.clone())
-            )
-            .await
-            .status(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            browser_sample(
-                State(a.clone()),
-                Path(key.clone()),
-                headers.clone(),
-                Json(sample.clone())
-            )
-            .await
-            .status(),
-            StatusCode::NO_CONTENT
-        );
-        assert_eq!(
-            browser_sample(
-                State(a.clone()),
-                Path(key.clone()),
-                headers.clone(),
-                Json(sample.clone())
-            )
-            .await
-            .status(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(browser.lock().unwrap().samples.len(), 1);
-        let mut bad = sample.clone();
-        bad.max_frame_gap_ms = -1.0;
-        assert!(bad.validate().is_err());
-        let mut value = serde_json::to_value(&sample).unwrap();
-        value["cookie"] = json!("secret");
-        assert!(serde_json::from_value::<BrowserSample>(value).is_err());
-        drop(browser);
-        assert_eq!(
-            browser_sample(State(a), Path(key), headers, Json(sample))
-                .await
-                .status(),
-            StatusCode::CONFLICT
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn spool_is_durable_private_and_rate_limited() {
-        let root = std::env::temp_dir().join(format!("bug-spool-{}", rand::random::<u64>()));
-        let d = Diagnostics::open(root.clone()).unwrap();
-        let id = "a".repeat(24);
-        let value =
-            json!({"id": id, "delivery": {"status": "pending"}, "message_untrusted": "@everyone"});
-        d.save(&value).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(
-                &std::fs::read(root.join(format!("{id}.json"))).unwrap()
-            )
-            .unwrap(),
-            value
-        );
-        assert!(d.reserve(1).is_ok());
-        assert!(d.reserve(1).is_err());
-        assert!(d.reserve(2).is_ok());
-        assert!(d.save(&json!({"id": "../escape"})).is_err());
-        assert!(d.browser("bad").is_err());
-        let browser = d.browser(&"b".repeat(32)).unwrap();
-        assert!(Arc::ptr_eq(&browser, &d.browser(&"b".repeat(32)).unwrap()));
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

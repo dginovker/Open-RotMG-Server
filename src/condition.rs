@@ -9,6 +9,7 @@ pub const DAZED: u8 = 6;
 pub const STUNNED: u8 = 7;
 pub const INVISIBLE: u8 = 13;
 pub const PARALYZED: u8 = 14;
+pub const SPEEDY: u8 = 15;
 pub const BLEEDING: u8 = 16;
 pub const HEALING: u8 = 18;
 pub const DAMAGING: u8 = 19;
@@ -19,6 +20,7 @@ pub const INVINCIBLE: u8 = 24;
 pub const INVULNERABLE: u8 = 25;
 pub const ARMORED: u8 = 26;
 pub const ARMOR_BROKEN: u8 = 27;
+pub const HEXED: u8 = 28;
 pub const fn bit(index: u8) -> i32 {
     1 << (index - 1)
 }
@@ -60,5 +62,5 @@ pub fn damage(raw: i32, defense: i32, flags: i32, piercing: bool) -> i32 {
     } else {
         defense
     };
-    (raw - defense).max(raw * 15 / 100).max(1)
+    (raw - defense).max(raw * 15 / 100)
 }
