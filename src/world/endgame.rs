@@ -1,26 +1,67 @@
 use super::*;
 use crate::endgame::{CASTLE, CELLAR, HEROES, INCANTATION, LOCKED_CELLAR, RealmCycle, RealmStage};
+use rand::seq::IteratorRandom;
 
+// Gameplay documentation specifies two minutes, unlike modified forks' 20s: https://wikiwiki.jp/rmd/イベント#jded12e1
+pub(super) const REMAINING_TAUNT_MS: u64 = 120_000;
+
+#[derive(Default)]
 pub(super) struct RealmDirectory {
-    pub active: i32,
-    cycles: BTreeMap<i32, RealmCycle>,
-    forced: BTreeMap<i32, (i32, i32)>,
-    retry: BTreeMap<i32, u64>,
+    pub realms: BTreeMap<i32, RealmRecord>,
+    pub(super) forced: BTreeMap<i32, ForcedRoute>,
 }
-impl Default for RealmDirectory {
-    fn default() -> Self {
+pub(super) struct RealmRecord {
+    pub cycle: RealmCycle,
+    pub portal: Option<i32>,
+    pub name: usize,
+    pub enabled: bool,
+    replacement: Option<i32>,
+    pub castle: Option<i32>,
+    pub pending_transfers: BTreeSet<i32>,
+    publish_at: Option<u64>,
+    retry_at: u64,
+    next_taunt: u64,
+}
+impl RealmRecord {
+    fn new(cycle: RealmCycle, now: u64) -> Self {
         Self {
-            active: -3,
-            cycles: BTreeMap::new(),
-            forced: BTreeMap::new(),
-            retry: BTreeMap::new(),
+            cycle,
+            portal: None,
+            name: 0,
+            enabled: true,
+            replacement: None,
+            castle: None,
+            pending_transfers: BTreeSet::new(),
+            publish_at: None,
+            retry_at: 0,
+            next_taunt: now + REMAINING_TAUNT_MS,
         }
+    }
+}
+#[derive(Clone, Copy)]
+pub(super) struct ForcedRoute {
+    pub origin: i32,
+    destination: i32,
+    select_when_paused: bool,
+    frozen: bool,
+}
+impl RealmDirectory {
+    pub(super) fn references_world(&self, id: i32) -> bool {
+        self.realms.contains_key(&id)
+            || self
+                .realms
+                .values()
+                .any(|r| r.castle == Some(id) && !r.pending_transfers.is_empty())
+            || self
+                .forced
+                .values()
+                .any(|r| r.origin == id || r.destination == id)
     }
 }
 pub struct ForcedTransfer {
     pub player: i32,
     pub output: Output,
-    pub destination: i32,
+    pub destination: Option<i32>,
     pub key_time: i32,
     pub key: Vec<u8>,
     pub name: String,
@@ -28,10 +69,16 @@ pub struct ForcedTransfer {
 impl ForcedTransfer {
     pub fn packet(&self) -> Packet {
         let mut o = Writer::new();
+        let Some(destination) = self.destination else {
+            // Selected 123.5.1 FAILURE 5 completes the scene without reconnecting a paused member.
+            o.i32(5)
+                .utf("Realm closed while you were paused. Select your character to continue.");
+            return Packet { id: 0, body: o.0 };
+        };
         o.utf(&self.name)
             .utf("")
             .i32(2050)
-            .i32(self.destination)
+            .i32(destination)
             .i32(self.key_time)
             .i16(self.key.len() as i16);
         o.0.extend_from_slice(&self.key);
@@ -40,10 +87,11 @@ impl ForcedTransfer {
 }
 impl Directory {
     pub fn stage_unlock(&mut self, plan: InventoryPlan) -> Result<InventoryPlan> {
-        let Some((locked, opened)) = plan.unlock else {
+        let Some(portal) = plan.unlock else {
             return Ok(plan);
         };
-        ensure!(!self.portals.contains_key(&opened), "unlock already staged");
+        let PortalPlan { locked, opened } = portal;
+        ensure!(!self.portals.contains_key(&opened), "portal already staged");
         let origin = self.location(plan.player)?;
         let w = &self.worlds[&origin];
         let p = &w.players[&plan.player];
@@ -52,21 +100,42 @@ impl Directory {
                 && p.character.revision == plan.revision
                 && p.character.account == plan.account
                 && p.character.id == plan.character,
-            "unlock owner reservation changed"
+            "portal owner reservation changed"
         );
-        ensure!(
-            w.entities
-                .get(&locked)
-                .is_some_and(|e| e.kind == LOCKED_CELLAR && e.reserved && e.published),
-            "locked portal reservation missing"
-        );
+        let kind = w
+            .entities
+            .get(&opened)
+            .context("staged portal missing")?
+            .kind;
+        let template = if let Some(locked) = locked {
+            ensure!(
+                w.entities
+                    .get(&locked)
+                    .is_some_and(|e| e.kind == LOCKED_CELLAR && e.reserved && e.published),
+                "locked portal reservation missing"
+            );
+            ensure!(kind == 0x700, "Incantation staged the wrong portal");
+            Some(CELLAR)
+        } else {
+            crate::dungeon::DUNGEONS
+                .iter()
+                .chain(crate::endgame::DUNGEONS)
+                .find(|(portal, _, _, _)| *portal == kind)
+                .map(|(_, template, _, _)| *template)
+        };
         ensure!(
             w.entities
                 .get(&opened)
-                .is_some_and(|e| e.kind == 0x700 && e.reserved && !e.published),
-            "unpublished Cellar portal missing"
+                .is_some_and(|e| e.kind == kind && e.reserved && !e.published),
+            "unpublished portal missing"
         );
-        let destination = match self.instance(CELLAR, None) {
+        let destination = match template
+            .map(|template| {
+                let route = self.dungeon_return_from(origin)?;
+                self.instance(template, None, Some(route))
+            })
+            .transpose()
+        {
             Ok(destination) => destination,
             Err(error) => {
                 let w = self.worlds.get_mut(&origin).unwrap();
@@ -80,24 +149,27 @@ impl Directory {
             Portal {
                 origin,
                 destination,
-                expires: self.tick + 2400,
+                expires: self.tick + portal.lifetime(),
             },
         );
         tracing::info!(
             player = plan.player,
-            locked,
             opened,
             destination,
-            "Cellar binding staged; Incantation not consumed or portal published yet"
+            template,
+            origin,
+            kind,
+            "portal binding staged; consumable not committed or portal published yet"
         );
         Ok(plan)
     }
     pub fn finish_inventory(&mut self, mut plan: InventoryPlan, result: Result<i32>) -> Result<()> {
-        let Some((locked, opened)) = plan.unlock.take() else {
+        let Some(portal) = plan.unlock.take() else {
             return self
                 .resolve(Target::Player(plan.player))?
                 .finish_inventory(plan, result);
         };
+        let PortalPlan { locked, opened } = portal;
         let player = plan.player;
         let origin = self.location(player)?;
         let w = &self.worlds[&origin];
@@ -107,22 +179,23 @@ impl Directory {
                 && p.character.revision == plan.revision
                 && p.character.account == plan.account
                 && p.character.id == plan.character,
-            "stale or foreign unlock completion"
+            "stale or foreign portal completion"
         );
         ensure!(
-            w.entities
-                .get(&locked)
-                .is_some_and(|e| e.reserved && e.kind == LOCKED_CELLAR)
+            locked.is_none_or(|id| w
+                .entities
+                .get(&id)
+                .is_some_and(|e| e.reserved && e.kind == LOCKED_CELLAR))
                 && w.entities
                     .get(&opened)
-                    .is_some_and(|e| e.reserved && !e.published && e.kind == 0x700),
-            "unlock reservation lost or already published"
+                    .is_some_and(|e| e.reserved && !e.published),
+            "portal reservation lost or already published"
         );
         let binding = self
             .portals
             .get(&opened)
-            .context("staged Cellar binding lost")?;
-        ensure!(binding.origin == origin, "staged Cellar origin changed");
+            .context("staged portal binding lost")?;
+        ensure!(binding.origin == origin, "staged portal origin changed");
         let destination = binding.destination;
         if result.is_err() {
             self.worlds
@@ -130,13 +203,15 @@ impl Directory {
                 .unwrap()
                 .discard_unlock(locked, opened)?;
             self.portals.remove(&opened);
-            ensure!(
-                self.worlds[&destination].players.is_empty()
-                    && !self.grants.values().any(|g| g.destination == destination),
-                "unpublished Cellar acquired a participant"
-            );
-            self.worlds.remove(&destination);
-            self.idle.remove(&destination);
+            if let Some(destination) = destination {
+                ensure!(
+                    self.worlds[&destination].players.is_empty()
+                        && !self.grants.values().any(|g| g.destination == destination),
+                    "unpublished dungeon acquired a participant"
+                );
+                self.worlds.remove(&destination);
+                self.idle.remove(&destination);
+            }
             return self
                 .worlds
                 .get_mut(&origin)
@@ -148,46 +223,70 @@ impl Directory {
             .unwrap()
             .finish_inventory(plan, result)?;
         let w = self.worlds.get_mut(&origin).unwrap();
-        w.entities
-            .get_mut(&locked)
-            .context("committed locked portal lost")?
-            .reserved = false;
-        w.remove_entity(locked);
+        if let Some(locked) = locked {
+            w.entities
+                .get_mut(&locked)
+                .context("committed locked portal lost")?
+                .reserved = false;
+            w.remove_entity(locked);
+        }
         let e = w
             .entities
             .get_mut(&opened)
-            .context("committed Cellar portal lost")?;
+            .context("committed portal lost")?;
         e.reserved = false;
         e.published = true;
-        self.portals.get_mut(&opened).unwrap().expires = self.tick + 2400;
+        let kind = e.kind;
+        let dungeon = e.name.clone();
+        self.portals.get_mut(&opened).unwrap().expires = self.tick + portal.lifetime();
+        if locked.is_none() {
+            let name = w.players[&player].character.name.clone();
+            w.broadcast_text("", &format!("{dungeon} opened by {name}!"));
+        }
+        let p = &w.players[&player];
         tracing::info!(
             player,
-            locked,
+            account = p.character.account,
+            character = p.character.id,
+            revision = p.character.revision,
             opened,
+            kind,
             destination,
-            "Incantation committed; bound Wine Cellar portal published"
+            origin,
+            "consumable committed; bound dungeon portal published"
         );
         Ok(())
     }
-    fn chamber_step(&mut self) {
-        let markers: Vec<_> = self
+    fn chamber_step(&mut self, ready: &[i32]) {
+        let now = self.tick * 50;
+        let castles: Vec<_> = self
             .worlds
-            .iter()
-            .filter(|(_, w)| w.name == "Oryx's Castle" && w.cleared)
-            .flat_map(|(origin, w)| {
-                w.entities
+            .summaries()
+            .filter(|(id, w)| {
+                (ready.contains(id) || !w.needs_coordinator())
+                    && w.chamber_at.is_some_and(|at| at <= now)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let markers: Vec<_> = castles
+            .into_iter()
+            .flat_map(|origin| {
+                self.worlds[&origin]
+                    .entities
                     .values()
-                    .filter(|e| e.kind == 0xd7a && e.next_aux <= self.tick * 50)
-                    .map(|e| (*origin, e.id, e.pos))
+                    .filter(move |e| e.kind == 0xd7a && e.next_aux <= now)
+                    .map(move |e| (origin, e.id, e.pos))
             })
             .collect();
+        let origins: Vec<_> = markers.iter().map(|(origin, _, _)| *origin).collect();
         for (origin, marker, pos) in markers {
             let result = (|| -> Result<()> {
                 ensure!(
                     self.worlds[&origin].walkable(pos),
                     "authored Chamber entrance position blocked"
                 );
-                let destination = self.instance(crate::endgame::CHAMBER, None)?;
+                self.reserve_worlds(1, &origins)?;
+                let destination = self.instance(crate::endgame::CHAMBER, None, None)?;
                 let portal =
                     match self
                         .worlds
@@ -206,7 +305,7 @@ impl Directory {
                     portal,
                     Portal {
                         origin,
-                        destination,
+                        destination: Some(destination),
                         expires: self.tick + 2400,
                     },
                 );
@@ -232,6 +331,9 @@ impl Directory {
                 tracing::error!(origin,%error,"earned Chamber binding failed; retry scheduled without publishing a portal");
             }
         }
+        for origin in origins {
+            self.worlds.release_world(&origin);
+        }
     }
     pub(super) fn bind_realm_heroes(&mut self, origin: i32, heroes: BTreeSet<i32>) -> Result<()> {
         let world = self.worlds.get(&origin).context("closure Realm missing")?;
@@ -240,13 +342,15 @@ impl Directory {
             "closure roster requires an open Realm"
         );
         ensure!(
-            !self.endgame.cycles.contains_key(&origin),
+            !self.endgame.realms.contains_key(&origin),
             "Realm roster already bound"
         );
         for id in &heroes {
             let hero = world.entities.get(id).context("closure hero missing")?;
             ensure!(
-                HEROES.contains(&hero.kind) && hero.hp > 0,
+                (HEROES.contains(&hero.kind)
+                    || crate::quest::root(hero.kind) && hero.quest == Some(*id))
+                    && hero.hp > 0,
                 "closure identity is not a living qualifying hero"
             );
         }
@@ -256,19 +360,55 @@ impl Directory {
             heroes = cycle.remaining.len(),
             "finite Realm closure roster bound"
         );
-        self.endgame.cycles.insert(origin, cycle);
+        self.endgame
+            .realms
+            .insert(origin, RealmRecord::new(cycle, self.tick * 50));
         Ok(())
     }
-    pub(super) fn endgame_step(&mut self) {
-        self.chamber_step();
+    pub(super) fn endgame_step(&mut self, ready: &[i32]) {
+        self.chamber_step(ready);
         let now = self.tick * 50;
-        for (origin, world) in &mut self.worlds {
+        let due:Vec<_>=self.worlds.summaries().filter(|(id,world)| {
+            ready.contains(id) && world.critical || (ready.contains(id) || !world.needs_coordinator()) && self.endgame.realms.get(id).is_some_and(|record| {
+                record.enabled && record.cycle.admits() && now>=record.next_taunt
+                    || matches!(record.cycle.stage, RealmStage::Closing{deadline}|RealmStage::Sealed{deadline} if now>=deadline)
+            })
+        }).map(|(id,_)|*id).collect();
+        for origin in &due {
+            let world = self.worlds.get_mut(origin).expect("endgame source missing");
             let deaths = std::mem::take(&mut world.critical_deaths);
-            let Some(cycle) = self.endgame.cycles.get_mut(origin) else {
+            let Some(record) = self.endgame.realms.get_mut(origin) else {
+                self.worlds.release_world(origin);
                 continue;
             };
+            let cycle = &mut record.cycle;
             for id in deaths {
+                if cycle.admits() && cycle.remaining.contains(&id) {
+                    match world.earn_realm_event(id) {
+                        Ok(realm_events::EventAdmission::Spawned(event)) => {
+                            assert!(
+                                cycle.remaining.insert(event),
+                                "summoned event already counted"
+                            );
+                        }
+                        Ok(realm_events::EventAdmission::Waiting) => {
+                            world.critical_deaths.push(id);
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::error!(origin, hero=id, %error, "earned Realm event initialization refused; retained for retry");
+                            world.critical_deaths.push(id);
+                            continue;
+                        }
+                        Ok(realm_events::EventAdmission::Miss) => {}
+                    }
+                }
+                let killer = world.critical_killers.remove(&id);
                 if cycle.defeated(id, now) {
+                    if let Some((kind, player)) = killer {
+                        world.realm_killed_notice(kind, &player);
+                    }
+                    world.last_realm_enemy_notice(&cycle.remaining);
                     tracing::info!(
                         origin,
                         hero = id,
@@ -278,69 +418,142 @@ impl Directory {
                     if !cycle.admits() {
                         world.admission_open = false;
                         world.oryx_notice(
-                            "My minions have failed me! This Realm will close in one minute.",
+                            "I HAVE CLOSED THIS REALM! YOU WILL NOT LIVE TO SEE THE LIGHT OF DAY!",
                         );
                         self.grants.retain(|_, g| g.destination != *origin);
+                        world.admissions.clear();
                     }
                 }
             }
-            if cycle.advance(now) && matches!(cycle.stage, RealmStage::Sealed { .. }) {
-                world.oryx_notice(
-                    "I have closed this Realm! I will bring you to my Castle in 22 seconds.",
-                );
+            if record.enabled && cycle.admits() && now >= record.next_taunt {
+                record.next_taunt = now + REMAINING_TAUNT_MS;
+                if let Some((kind, count, text)) = world.remaining_taunt(&cycle.remaining) {
+                    world.oryx_notice(&text);
+                    tracing::info!(world = origin, time_ms = now, kind, count, %text, "Oryx remaining encounters announced");
+                }
+            }
+            while cycle.advance(now) {
+                tracing::info!(origin, now, stage = ?cycle.stage, "Realm closure deadline reached");
+                if matches!(cycle.stage, RealmStage::Sealed { .. }) {
+                    for text in [
+                        "MY MINIONS HAVE FAILED ME!",
+                        "BUT NOW YOU SHALL FEEL MY WRATH",
+                        "COME MEET YOUR DOOM AT THE WALLS OF MY CASTLE!",
+                    ] {
+                        world.oryx_notice(text);
+                    }
+                    let quake = cooperative::effect(13, -1, Pos { x: 0., y: 0. });
+                    for p in world.players.values() {
+                        send(p, wire::SHOW_EFFECT, quake.clone());
+                    }
+                }
+            }
+            // Ordinary maintenance must not retain this loan while waiting for another Realm.
+            if cycle.stage != RealmStage::Transferring {
+                self.worlds.release_world(origin);
             }
         }
         let transferring: Vec<_> = self
             .endgame
-            .cycles
+            .realms
             .iter()
-            .filter(|(id, c)| {
-                c.stage == RealmStage::Transferring
-                    && self.endgame.active == **id
-                    && self.endgame.retry.get(id).is_none_or(|t| self.tick >= *t)
+            .filter(|(_, record)| {
+                record.cycle.stage == RealmStage::Transferring
+                    && record.replacement.is_none()
+                    && self.tick >= record.retry_at
             })
             .map(|(id, _)| *id)
             .collect();
         for origin in transferring {
             if let Err(error) = self.replace_realm(origin) {
-                self.endgame.retry.insert(origin, self.tick + 100);
+                self.endgame.realms.get_mut(&origin).unwrap().retry_at = self.tick + 100;
                 tracing::error!(origin, %error, "Realm transfer/replacement withheld; retry in five seconds");
             }
         }
-        self.endgame.forced.retain(|player, (origin, _)| {
+        let publishing: Vec<_> = self
+            .endgame
+            .realms
+            .iter()
+            .filter(|(_, record)| record.publish_at.is_some_and(|tick| self.tick >= tick))
+            .map(|(origin, record)| (*origin, record.replacement.unwrap()))
+            .collect();
+        for (origin, replacement) in publishing {
+            self.endgame.realms.get_mut(&replacement).unwrap().enabled = true;
+            self.worlds.get_mut(&replacement).unwrap().admission_open = true;
+            self.endgame.realms.get_mut(&origin).unwrap().publish_at = None;
+            tracing::info!(
+                origin,
+                replacement,
+                "safe collective departure completed; replacement published"
+            );
+        }
+        self.endgame.forced.retain(|player, route| {
             self.worlds
-                .get(origin)
+                .summary(&route.origin)
                 .is_some_and(|w| w.players.contains_key(player))
         });
         let retired: Vec<_> = self
             .endgame
-            .cycles
+            .realms
             .iter()
-            .filter(|(id, c)| {
-                **id != self.endgame.active
-                    && c.stage == RealmStage::Transferring
-                    && self.worlds.get(id).is_some_and(|w| w.players.is_empty())
+            .filter(|(id, record)| {
+                record.replacement.is_some()
+                    && record.publish_at.is_none()
+                    && record.pending_transfers.is_empty()
+                    && self
+                        .worlds
+                        .summary(id)
+                        .expect("retiring Realm metadata missing")
+                        .players
+                        .is_empty()
+                    && !self
+                        .grants
+                        .values()
+                        .any(|g| g.origin == Some(**id) || g.destination == **id)
+                    && !self
+                        .endgame
+                        .forced
+                        .values()
+                        .any(|route| route.origin == **id)
             })
             .map(|(id, _)| *id)
             .collect();
         for origin in retired {
             self.portals.retain(|_, p| p.origin != origin);
-            self.grants.retain(|_, g| g.destination != origin);
+            if let Some(portal) = self.endgame.realms[&origin].portal {
+                self.worlds.get_mut(&-2).unwrap().remove_entity(portal);
+            }
             self.worlds.remove(&origin);
             self.idle.remove(&origin);
-            self.endgame.cycles.remove(&origin);
-            self.endgame.retry.remove(&origin);
+            self.endgame.realms.remove(&origin);
             tracing::info!(origin, "empty retired Realm removed");
         }
     }
+    pub(crate) fn realm_departed(&mut self, origin: i32, player: i32) {
+        let Some(record) = self.endgame.realms.get_mut(&origin) else {
+            return;
+        };
+        if record.pending_transfers.remove(&player) && record.pending_transfers.is_empty() {
+            record.publish_at = Some(self.tick + crate::endgame::REPLACEMENT_DELAY_MS / 50);
+            tracing::info!(
+                origin,
+                publish_tick = record.publish_at,
+                "all collective recipients durably departed; replacement delay started"
+            );
+        }
+    }
     fn replace_realm(&mut self, origin: i32) -> Result<()> {
-        ensure!(
-            self.worlds.len() + 2 <= 12,
-            "no room for collective Castle and replacement Realm"
-        );
+        self.worlds.get(&origin).context("closing Realm missing")?;
+        self.reserve_worlds(2, &[origin])?;
         let castle = self.make(CASTLE, "Oryx's Castle", false, None)?;
         let realm = self.make("realm-shore", "Realm", false, None)?;
         let next_cycle = RealmCycle::new(realm.hero_identities())?;
+        let name = (1..=super::realm_portal::NAMES.len())
+            .map(|offset| {
+                (self.endgame.realms[&origin].name + offset) % super::realm_portal::NAMES.len()
+            })
+            .find(|name| self.endgame.realms.values().all(|r| r.name != *name))
+            .context("no unused Realm name")?;
         let castle_id = self.next_world;
         let realm_id = castle_id
             .checked_add(1)
@@ -361,23 +574,55 @@ impl Directory {
                     && !p.death_pending
                     && !p.departing
                     && p.persistence_failure.is_none()
+                    && p.tx
+                        .as_ref()
+                        .is_some_and(|tx| !tx.packets.is_closed() && !tx.lost.borrow().is_some())
             })
             .map(|(id, _)| *id)
             .collect();
+        let old_portal = self.endgame.realms[&origin]
+            .portal
+            .context("closing Realm has no exact Nexus portal binding")?;
+        let nexus = self.worlds.get_mut(&-2).context("Nexus missing")?;
+        let entrance = nexus
+            .entities
+            .get(&old_portal)
+            .context("closing Realm entrance missing")?;
+        ensure!(
+            entrance.kind == 0x712,
+            "closing Realm entrance kind changed"
+        );
+        let portal = nexus.spawn_entity(0x712, entrance.pos, vec![])?;
+        nexus.entities.get_mut(&portal).unwrap().published = false;
+        let mut realm = realm;
+        realm.admission_open = false;
         self.worlds.insert(castle_id, castle);
         self.worlds.insert(realm_id, realm);
         self.next_world = next;
         self.idle.insert(castle_id, self.tick);
-        self.endgame.active = realm_id;
-        self.endgame.cycles.insert(realm_id, next_cycle);
-        self.endgame.retry.remove(&origin);
-        for player in &players {
-            self.endgame.forced.insert(*player, (origin, castle_id));
+        let mut record = RealmRecord::new(next_cycle, self.tick * 50);
+        record.portal = Some(portal);
+        record.name = name;
+        record.enabled = false;
+        self.endgame.realms.insert(realm_id, record);
+        let record = self.endgame.realms.get_mut(&origin).unwrap();
+        record.replacement = Some(realm_id);
+        record.castle = Some(castle_id);
+        record.pending_transfers = players.iter().copied().collect();
+        if players.is_empty() {
+            record.publish_at = Some(self.tick + crate::endgame::REPLACEMENT_DELAY_MS / 50);
         }
-        self.worlds
-            .get_mut(&origin)
-            .unwrap()
-            .oryx_notice("Your fate awaits in my Castle!");
+        for player in &players {
+            self.endgame.forced.insert(
+                *player,
+                ForcedRoute {
+                    origin,
+                    destination: castle_id,
+                    select_when_paused: true,
+                    frozen: false,
+                },
+            );
+        }
         tracing::info!(
             origin,
             castle = castle_id,
@@ -387,12 +632,45 @@ impl Directory {
         );
         Ok(())
     }
+    pub(super) fn return_to_nexus(&mut self, player: i32, origin: i32, frozen: bool) {
+        self.endgame.forced.insert(
+            player,
+            ForcedRoute {
+                origin,
+                destination: -2,
+                select_when_paused: false,
+                frozen,
+            },
+        );
+    }
+
     #[cfg(test)]
     pub fn forced_transfer_candidates(&self) -> Vec<i32> {
         self.endgame.forced.keys().copied().collect()
     }
+    pub(crate) fn cancel_forced_transfer(&mut self, transfer: &ForcedTransfer) {
+        if let Some(grant) = self.grants.remove(&transfer.key) {
+            self.worlds
+                .get_mut(&grant.destination)
+                .unwrap()
+                .admissions
+                .remove(&transfer.key);
+            tracing::error!(
+                origin = grant.origin,
+                destination = grant.destination,
+                player = transfer.player,
+                "durable collective departure failed; reservation revoked and origin retained for quarantine"
+            );
+        }
+    }
     pub fn forced_transfer(&mut self, player: i32) -> Result<Option<ForcedTransfer>> {
-        let Some(&(origin, destination)) = self.endgame.forced.get(&player) else {
+        let Some(&ForcedRoute {
+            origin,
+            destination,
+            select_when_paused,
+            frozen,
+        }) = self.endgame.forced.get(&player)
+        else {
             return Ok(None);
         };
         let Some(p) = self
@@ -406,7 +684,7 @@ impl Directory {
         if !p.character.alive
             || p.character.hp <= 0
             || p.death_pending
-            || p.departing
+            || p.departing && !frozen
             || p.persistence_failure.is_some()
         {
             self.endgame.forced.remove(&player);
@@ -415,10 +693,11 @@ impl Directory {
         if p.pending || p.experience_queued > 0 || p.clears_queued.iter().any(|count| *count > 0) {
             return Ok(None);
         }
+        let destination = (!select_when_paused || !p.paused).then_some(destination);
         let output =
             p.tx.clone()
                 .context("collective transfer recipient lacks an owned RECONNECT output")?;
-        if output.packets.is_closed() || *output.lost.borrow() {
+        if output.packets.is_closed() || output.lost.borrow().is_some() {
             self.endgame.forced.remove(&player);
             tracing::info!(
                 player,
@@ -428,7 +707,14 @@ impl Directory {
             return Ok(None);
         }
         let (account, character) = (p.character.account, p.character.id);
-        let (key_time, key, name) = self.issue(account, character, destination)?;
+        self.retire_transfer_grants();
+        if destination.is_some() && self.grants.len() >= 64 {
+            return Ok(None);
+        }
+        let (key_time, key, name) = match destination {
+            Some(destination) => self.issue(account, character, destination)?,
+            None => (0, Vec::new(), String::new()),
+        };
         let world = self.worlds.get_mut(&origin).unwrap();
         world.cancel_trade(player, "Trade cancelled by Realm closure.");
         let p = world.players.get_mut(&player).unwrap();
@@ -450,66 +736,36 @@ impl Directory {
 }
 impl World {
     pub(super) fn populate_realm_heroes(&mut self) -> Result<()> {
-        for (kind, terrain) in [(HEROES[0], 5), (HEROES[1], 6)] {
-            let mut candidates: Vec<_> = self
-                .map
-                .cells
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| {
-                    let pos = Pos {
-                        x: (i % self.map.width as usize) as f32 + 0.5,
-                        y: (i / self.map.width as usize) as f32 + 0.5,
-                    };
-                    (c.terrain == terrain && c.object.is_none() && self.walkable(pos))
-                        .then_some(pos)
-                })
-                .collect();
-            candidates.shuffle(&mut self.rng);
-            candidates.sort_by_key(|p| self.map.cell(p.x, p.y).unwrap().ground != 0xd0);
-            let mut placed = 0;
-            for pos in candidates {
-                if self
-                    .map
-                    .spawns
-                    .iter()
-                    .any(|(x, y)| pos.distance(Pos { x: *x, y: *y }) < 64.)
-                    || self.entities.values().any(|e| {
-                        self.content.objects[&e.kind].enemy
-                            && pos.distance(e.pos) < if HEROES.contains(&e.kind) { 28. } else { 8. }
-                    })
-                {
-                    continue;
-                }
-                self.spawn_entity(kind, pos, vec![])?;
-                placed += 1;
-                if placed == 3 {
-                    break;
-                }
-            }
-            ensure!(
-                placed == 3,
-                "Realm terrain {terrain} cannot place its finite {kind:#x} hero roster"
-            );
-            tracing::info!(
-                kind,
-                placed,
-                terrain,
-                "finite nonrespawning closure heroes placed"
-            );
+        // GPL-3.0 requested counts, not authenticated 123.5.1 density (data/REALM-SRC-LICENSE):
+        // https://github.com/moistosaurus/realm-src/blob/1855c017eab870d13f0b61b1cf0b9e66a01922ff/wServer/realm/setpieces/SetPieces.cs
+        // Unlike its 50-attempt skips, our protected allocator fulfills requests or errors.
+        for (kind, terrains, range) in [(HEROES[0], &[1][..], 3..5), (HEROES[1], &[3, 4][..], 4..7)]
+        {
+            let count = self.rng.gen_range(range);
+            self.populate_landmark_heroes(kind, terrains, count)?;
         }
+        Ok(())
+    }
+    fn populate_landmark_heroes(&mut self, kind: u16, terrains: &[u8], count: usize) -> Result<()> {
+        for _ in 0..count {
+            let pos = self.place_named_setpiece(kind, terrains)?;
+            self.spawn_entity(kind, pos, vec![])?;
+        }
+        tracing::info!(kind, count, "finite landmark heroes placed");
         Ok(())
     }
     pub(super) fn hero_identities(&self) -> BTreeSet<i32> {
         self.entities
             .values()
-            .filter(|e| HEROES.contains(&e.kind))
+            .filter(|e| {
+                HEROES.contains(&e.kind) || (crate::quest::root(e.kind) && e.quest == Some(e.id))
+            })
             .map(|e| e.id)
             .collect()
     }
     pub(super) fn prepare_endgame(&mut self) -> Result<()> {
         if self.name == "Oryx's Castle" {
-            for e in self.entities.values_mut().filter(|e| e.kind == 0xd7d) {
+            for e in self.entities.matching_mut(|e| e.kind == 0xd7d) {
                 e.condition |= crate::condition::bit(crate::condition::INVINCIBLE);
                 e.published = false;
             }
@@ -546,7 +802,7 @@ impl World {
                 self.entities.values().filter(|e| e.kind == boss).count() == 1,
                 "endgame room requires one selected boss"
             );
-            for e in self.entities.values_mut().filter(|e| e.kind == 0x71d) {
+            for e in self.entities.matching_mut(|e| e.kind == 0x71d) {
                 e.published = false;
             }
         }
@@ -572,7 +828,7 @@ impl World {
         );
         ensure!(
             self.name == "Oryx's Chamber" && self.cleared,
-            "Wine Cellar requires a defeated Oryx"
+            controller("Wine Cellar requires a defeated Oryx")
         );
         let p = &self.players[&id];
         let locked = self
@@ -580,348 +836,422 @@ impl World {
             .values()
             .filter(|e| e.kind == LOCKED_CELLAR && e.published && p.pos.distance(e.pos) <= 3.)
             .min_by(|a, b| p.pos.distance(a.pos).total_cmp(&p.pos.distance(b.pos)))
-            .context("no locked Wine Cellar portal nearby")?;
+            .ok_or_else(|| controller("no locked Wine Cellar portal nearby"))?;
         ensure!(
             !locked.reserved,
-            "another Incantation already reserves this portal"
+            controller("another Incantation already reserves this portal")
         );
         let (locked, pos) = (locked.id, locked.pos);
-        let mut items = p.character.items.clone();
+        self.reserve_portal(id, slot, 0x700, Some(locked), pos, dungeon.clone())
+    }
+    pub(super) fn begin_create(
+        &mut self,
+        id: i32,
+        slot: Slot,
+        item: &crate::content::Object,
+    ) -> Result<InventoryPlan> {
+        ensure!(
+            item.consumable && item.activations == 1,
+            "invalid dungeon key activation"
+        );
+        let name = item
+            .create_object
+            .as_ref()
+            .context("key portal identity missing")?;
+        let portal = self
+            .content
+            .objects
+            .values()
+            .find(|p| &p.name == name)
+            .context("key references an unknown portal")?;
+        ensure!(
+            portal.class == "Portal" && portal.dungeon_name.is_some(),
+            "key target is not a dungeon portal"
+        );
+        let dungeon = portal
+            .dungeon_name
+            .clone()
+            .context("key portal dungeon name missing")?;
+        self.reserve_portal(id, slot, portal.kind, None, self.players[&id].pos, dungeon)
+    }
+    fn reserve_portal(
+        &mut self,
+        id: i32,
+        slot: Slot,
+        kind: u16,
+        locked: Option<i32>,
+        pos: Pos,
+        name: String,
+    ) -> Result<InventoryPlan> {
+        let usable = crate::dungeon::DUNGEONS
+            .iter()
+            .chain(crate::endgame::DUNGEONS)
+            .any(|(portal, _, _, _)| *portal == kind);
+        let mut items = self.players[&id].character.items.clone();
         items[slot.slot] = -1;
-        let opened = self.spawn_entity(0x700, pos, vec![])?;
+        let opened = self.spawn_entity(kind, pos, vec![])?;
         let e = self.entities.get_mut(&opened).unwrap();
-        e.name = dungeon.clone();
+        e.name = name;
+        e.extra_stats.retain(|(stat, _)| *stat != 37);
+        e.extra_stats.push((37, i32::from(usable)));
         e.published = false;
         e.reserved = true;
-        self.entities.get_mut(&locked).unwrap().reserved = true;
+        if let Some(locked) = locked {
+            self.entities.get_mut(&locked).unwrap().reserved = true;
+        }
         self.players.get_mut(&id).unwrap().pending = true;
-        let mut plan = self.plan(id, items, None, 0);
-        plan.unlock = Some((locked, opened));
+        let mut plan = self.plan(id, items, None);
+        plan.unlock = Some(PortalPlan { locked, opened });
         Ok(plan)
     }
-    fn discard_unlock(&mut self, locked: i32, opened: i32) -> Result<()> {
+    fn discard_unlock(&mut self, locked: Option<i32>, opened: i32) -> Result<()> {
         ensure!(
             self.entities
                 .get(&opened)
                 .is_some_and(|e| !e.published && e.reserved),
-            "cannot discard a published Cellar portal"
+            "cannot discard a published portal"
         );
         self.entities.get_mut(&opened).unwrap().reserved = false;
         self.remove_entity(opened);
-        self.entities
-            .get_mut(&locked)
-            .context("reserved locked portal lost")?
-            .reserved = false;
+        if let Some(locked) = locked {
+            self.entities
+                .get_mut(&locked)
+                .context("reserved locked portal lost")?
+                .reserved = false;
+        }
         Ok(())
     }
-    fn oryx_notice(&self, text: &str) {
-        let packet = chat::text_packet("Oryx the Mad God", -1, 0, text);
-        for p in self
-            .players
-            .values()
-            .filter(|p| !p.departing && p.persistence_failure.is_none())
-        {
-            send(p, packet.id, packet.body.clone());
+    fn remaining_taunt(&self, remaining: &BTreeSet<i32>) -> Option<(u16, usize, String)> {
+        let mut families: BTreeMap<u16, BTreeSet<i32>> = BTreeMap::new();
+        for e in self.actors().filter(|e| e.hp > 0) {
+            let family = match e.kind {
+                0x91b | 0x91c => 0x91b,
+                0x91f | 0x920 => 0x91f,
+                0x928 | 0x92d => 0x928,
+                0x675 | 0x6c1 | 0x6c2 => 0x675,
+                kind if HEROES.contains(&kind)
+                    || crate::quest::EVENT_BOSSES.contains(&kind)
+                    || kind == 0x678 =>
+                {
+                    kind
+                }
+                _ => continue,
+            };
+            let tag = match e.quest {
+                Some(tag) => tag,
+                None => e.id,
+            };
+            if remaining.contains(&tag) {
+                families.entry(family).or_default().insert(tag);
+            }
         }
+        let (&kind, ids) = families.iter().choose(&mut rand::thread_rng())?;
+        let count = ids.len();
+        let text = match (kind, count == 1) {
+            (0x91b, false) => format!("I am invincible while my {count} Liches still stand!"),
+            (0x91b, true) => "My final Lich will protect me forever!".into(),
+            (0x91f, false) => {
+                format!("Mortal scum! My {count} Ent Ancients will defend me forever!")
+            }
+            (0x91f, true) => "My final Ent Ancient will destroy you all!".into(),
+            (0x928, false) => {
+                format!("My {count} Ghost Kings give me more than enough protection!")
+            }
+            (0x928, true) => "My final Ghost King is untouchable!".into(),
+            (0x675, false) => format!("Maggots! My {count} Phoenix Lords will burn you to ash!"),
+            (0x675, true) => "My final Phoenix Lord will never fall!".into(),
+            (0x678, false) => format!("You have no hope against my {count} Oasis Giants!"),
+            (0x678, true) => "A powerful Oasis Giant still fights for me!".into(),
+            (0x668, false) => format!("Fools! There is no escape from my {count} Red Demons!"),
+            (0x668, true) => "My final Red Demon is unassailable!".into(),
+            (0x67d, false) => format!("Cretins! I have {count} Cyclops Gods to guard me!"),
+            (0x67d, true) => "My last Cyclops God will smash you to pieces!".into(),
+            (0xd56, false) => format!("Imbeciles! My {count} Skull Shrines make me invincible!"),
+            (0xd56, true) => "Pathetic fools! A Skull Shrine guards me!".into(),
+            (0xd59, false) => format!("Filthy vermin! My {count} Cube Gods will exterminate you!"),
+            (0xd59, true) => "Worthless mortals! A mighty Cube God defends me!".into(),
+            (0xd5f, false) => format!("Wretched creatures! {count} Pentaracts remain!"),
+            (0xd5f, true) => "Ignorant fools! A Pentaract guards me still!".into(),
+            (0xd54, false) => format!(
+                "You dull-spirited apes! You shall pose no challenge for {count} Grand Sphinxes!"
+            ),
+            (0xd54, true) => {
+                "Gaze upon the beauty of the Grand Sphinx and feel your last hopes drain away."
+                    .into()
+            }
+            (0xd50, _) => "My Lord of the Lost Lands will make short work of you!".into(),
+            (0xd61, _) => {
+                "My Hermit God's thousand tentacles shall drag you to a watery grave!".into()
+            }
+            (0xe37, _) => "My Ghost Ship will send you to a watery grave.".into(),
+            _ => unreachable!("unsupported Oryx announcement family {kind:#x}"),
+        };
+        Some((kind, count, text))
+    }
+
+    pub(super) fn oryx_notice(&self, text: &str) {
+        self.broadcast_text("#Oryx the Mad God", text);
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn recipient(d: &mut Directory, account: i32) -> (i32, mpsc::Receiver<Packet>) {
-        let w = d.worlds.get_mut(&-3).unwrap();
-        let mut ch = super::super::tests::ch(w);
-        ch.account = account;
-        ch.id = account;
-        let (packets, mut rx) = mpsc::channel(64);
-        let (lost, _) = watch::channel(false);
-        let player = w.enter(ch, Some(Output { packets, lost })).unwrap();
-        while rx.try_recv().is_ok() {}
-        (player, rx)
-    }
-    fn arm(d: &mut Directory) -> BTreeSet<i32> {
-        d.endgame.cycles[&-3].remaining.clone()
-    }
-    fn defeat(d: &mut Directory, heroes: BTreeSet<i32>) {
-        let w = d.worlds.get_mut(&-3).unwrap();
-        for id in heroes {
-            w.remove_entity(id);
-            w.critical_deaths.push(id);
-        }
-        d.endgame_step();
-    }
-    #[test]
-    fn finite_closure_seals_both_admission_paths_and_replaces_without_erasing_owned_players() {
-        let mut d = super::super::tests::directory();
-        let (a, mut ar) = recipient(&mut d, 1);
-        let (b, _br) = recipient(&mut d, 2);
-        let (time, key, _) = d.issue(3, 3, -3).unwrap();
-        let heroes = arm(&mut d);
-        assert!(d.bind_realm_heroes(-3, heroes.clone()).is_err());
-        defeat(&mut d, heroes);
-        assert!(!d.worlds[&-3].admission_open);
-        assert!(d.initial(-3).is_err());
-        assert!(d.consume(3, -3, time, key).is_err());
-        let ch = super::super::tests::ch(&d.worlds[&-3]);
-        assert!(d.worlds.get_mut(&-3).unwrap().enter(ch, None).is_err());
-        assert_eq!(ar.try_recv().unwrap().id, wire::TEXT);
-        d.tick = 1200;
-        d.endgame_step();
-        assert!(matches!(
-            d.endgame.cycles[&-3].stage,
-            RealmStage::Sealed { .. }
-        ));
-        d.tick = 1640;
-        d.endgame_step();
-        let realm = d.initial(-3).unwrap();
-        assert!(realm > 0 && realm != -3);
-        let a_output = d.worlds[&-3].players[&a]
-            .tx
-            .as_ref()
-            .unwrap()
-            .packets
-            .clone();
-        let b_output = d.worlds[&-3].players[&b]
-            .tx
-            .as_ref()
-            .unwrap()
-            .packets
-            .clone();
-        assert_eq!(d.location(a).unwrap(), -3);
-        assert_eq!(d.location(b).unwrap(), -3);
-        let transfers: Vec<_> = d
-            .forced_transfer_candidates()
-            .into_iter()
-            .filter_map(|id| d.forced_transfer(id).unwrap())
-            .collect();
-        assert_eq!(transfers.len(), 2);
-        assert!(
-            transfers
-                .iter()
-                .find(|t| t.player == a)
-                .unwrap()
-                .output
-                .packets
-                .same_channel(&a_output)
-        );
-        assert!(
-            transfers
-                .iter()
-                .find(|t| t.player == b)
-                .unwrap()
-                .output
-                .packets
-                .same_channel(&b_output)
-        );
-        assert_eq!(transfers[0].destination, transfers[1].destination);
-        assert_eq!(d.worlds[&transfers[0].destination].name, "Oryx's Castle");
-        assert!(transfers.iter().all(|t| t.packet().id == 39));
-        assert!(
-            d.worlds[&-3]
-                .players
-                .values()
-                .all(|p| p.departing && p.tx.is_none())
-        );
-        assert!(d.forced_transfer_candidates().is_empty());
-        assert_eq!(d.worlds[&-3].players.len(), 2);
-    }
-    fn cellar_fixture() -> (Directory, i32, i32, i32) {
-        let mut d = super::super::tests::directory();
-        let (a, _) = recipient(&mut d, 1);
-        let (b, _) = recipient(&mut d, 2);
-        let w = d.worlds.get_mut(&-3).unwrap();
-        w.name = "Oryx's Chamber".into();
-        w.cleared = true;
-        let pos = w.players[&a].pos;
-        w.players.get_mut(&b).unwrap().pos = pos;
-        for id in [a, b] {
-            w.players.get_mut(&id).unwrap().character.items[4] = i32::from(INCANTATION);
-        }
-        let locked = w.spawn_entity(LOCKED_CELLAR, pos, vec![]).unwrap();
-        (d, a, b, locked)
-    }
-    fn incantation(w: &mut World, id: i32) -> Result<InventoryPlan> {
-        let slot = Slot {
-            object: id,
-            slot: 4,
-            kind: i32::from(INCANTATION),
+#[test]
+fn castle_ground_only_writes_preserve_native_scenery() {
+    let content = Arc::new(Content::load(std::path::Path::new("data")).unwrap());
+    let mut witnessed = BTreeSet::new();
+    let (mut bridges, mut walls) = (0, 0);
+    for seed in 0..16 {
+        let original = Arc::new(Map {
+            width: 192,
+            height: 192,
+            cells: vec![
+                crate::content::Cell {
+                    ground: 0x47,
+                    object: Some(0x105),
+                    config: "name:native;size:137".into(),
+                    terrain: 3,
+                    region: 0,
+                };
+                192 * 192
+            ],
+            spawns: vec![(1., 1.)],
+        });
+        let mut world = World::new(content.clone(), original.clone()).unwrap();
+        let native_ids: Vec<_> = (0..192 * 192).map(|i| world.cells.ids(i)[0]).collect();
+        let template = match &world.entities[&native_ids[0]].state {
+            entity_store::EntityState::Shared(t) => t.clone(),
+            _ => panic!("native Bush does not use shared scenery state"),
         };
-        w.use_item(id, slot, w.players[&id].pos)?
-            .context("Incantation did not return a commit plan")
-    }
-    #[test]
-    fn incantation_race_publishes_one_bound_cellar_only_after_commit() {
-        let (mut d, a, b, locked) = cellar_fixture();
-        let w = d.worlds.get_mut(&-3).unwrap();
-        let plan = incantation(w, a).unwrap();
-        let (_, opened) = plan.unlock.unwrap();
-        assert!(incantation(w, b).is_err());
-        assert_eq!(w.players[&a].character.items[4], i32::from(INCANTATION));
-        assert!(w.finish_inventory(plan.clone(), Ok(1)).is_err());
-        let plan = d.stage_unlock(plan).unwrap();
-        assert!(d.stage_unlock(plan.clone()).is_err());
-        assert!(d.destination(b, Some(opened)).is_err());
-        let cellar = d.portals[&opened].destination;
-        assert_eq!(d.worlds[&cellar].name, "Wine Cellar");
-        let replay = plan.clone();
-        d.finish_inventory(plan, Ok(1)).unwrap();
-        assert!(d.finish_inventory(replay, Ok(1)).is_err());
-        assert!(!d.worlds[&-3].entities.contains_key(&locked));
-        assert_eq!(d.worlds[&-3].players[&a].character.items[4], -1);
+        world.rng = rand::rngs::StdRng::seed_from_u64(seed);
+        world.populate_landmark_heroes(0x67d, &[3], 1).unwrap();
+        let chest = world.entities.values().find(|e| e.kind == 0x501).unwrap();
+        let root = world.entities.values().find(|e| e.kind == 0x67d).unwrap();
+        assert_eq!(world.setpieces.len(), 1);
         assert_eq!(
-            d.worlds[&-3].players[&b].character.items[4],
-            i32::from(INCANTATION)
+            world.entities.values().filter(|e| e.kind == 0x501).count(),
+            1
         );
-        assert_eq!(d.destination(a, Some(opened)).unwrap().2, cellar);
-        assert_eq!(d.destination(b, Some(opened)).unwrap().2, cellar);
-        assert!(incantation(d.worlds.get_mut(&-3).unwrap(), b).is_err());
-    }
-    #[test]
-    fn locked_portal_survives_empty_inventory_until_deadline_and_reservation_release() {
-        let (mut d, _, _, locked) = cellar_fixture();
-        let w = d.worlds.get_mut(&-3).unwrap();
-        w.bag_expiry.insert(locked, w.now + 120_000);
-        w.step();
-        assert!(
-            w.entities.contains_key(&locked),
-            "empty portal is not an empty loot bag"
-        );
-        w.entities.get_mut(&locked).unwrap().reserved = true;
-        w.now = 119_950;
-        w.step();
-        assert!(w.entities.contains_key(&locked));
-        w.entities.get_mut(&locked).unwrap().reserved = false;
-        w.step();
-        assert!(!w.entities.contains_key(&locked));
-    }
-    #[test]
-    fn committed_cellar_portal_survives_ticks_and_has_one_directory_expiry_owner() {
-        let (mut d, a, _, _) = cellar_fixture();
-        let plan = incantation(d.worlds.get_mut(&-3).unwrap(), a).unwrap();
-        let plan = d.stage_unlock(plan).unwrap();
-        let (_, opened) = plan.unlock.unwrap();
-        d.finish_inventory(plan, Ok(1)).unwrap();
-        for _ in 0..3 {
-            d.step();
-        }
-        assert!(d.worlds[&-3].entities.contains_key(&opened));
-        assert!(!d.worlds[&-3].bag_expiry.contains_key(&opened));
-        d.tick = d.portals[&opened].expires - 1;
-        d.worlds.get_mut(&-3).unwrap().now += 120_000;
-        d.step();
-        assert!(!d.worlds[&-3].entities.contains_key(&opened));
-        assert!(!d.portals.contains_key(&opened));
-        d.step();
-    }
-    #[test]
-    fn failed_cellar_save_or_instance_preflight_conserves_keys_and_removes_unpublished_worlds() {
-        let (mut d, a, b, locked) = cellar_fixture();
-        let plan = incantation(d.worlds.get_mut(&-3).unwrap(), a).unwrap();
-        let plan = d.stage_unlock(plan).unwrap();
-        let (_, opened) = plan.unlock.unwrap();
-        let cellar = d.portals[&opened].destination;
-        assert!(
-            d.finish_inventory(plan, Err(anyhow::anyhow!("fixture stale inventory write")))
-                .is_err()
-        );
-        assert!(!d.worlds.contains_key(&cellar) && !d.portals.contains_key(&opened));
-        let w = d.worlds.get_mut(&-3).unwrap();
-        assert!(w.entities[&locked].published && !w.entities[&locked].reserved);
-        assert!(!w.entities.contains_key(&opened));
-        assert_eq!(w.players[&a].character.items[4], i32::from(INCANTATION));
-        assert!(w.players[&a].persistence_failure.is_some());
-        while d.worlds.len() < 12 {
-            d.instance("pirate-cave", None).unwrap();
-        }
-        let plan = incantation(d.worlds.get_mut(&-3).unwrap(), b).unwrap();
-        let (_, opened) = plan.unlock.unwrap();
-        assert!(d.stage_unlock(plan).is_err());
-        let w = &d.worlds[&-3];
-        assert_eq!(w.players[&b].character.items[4], i32::from(INCANTATION));
-        assert!(!w.players[&b].pending && w.players[&b].persistence_failure.is_none());
-        assert!(!w.entities.contains_key(&opened) && !w.entities[&locked].reserved);
-    }
-    #[test]
-    fn chunked_boss_rewards_conserve_every_item_ownership_and_collection() {
-        let mut w = super::super::tests::world();
-        let mut rng = rand::rngs::mock::StepRng::new(0, 0);
-        let rewards: Vec<i32> = crate::loot::rewards(&w.content, crate::endgame::ORYX2, &mut rng)
-            .into_iter()
-            .map(i32::from)
-            .collect();
-        assert_eq!(rewards.len(), 13);
-        let (x, y) = w.map.spawns[0];
-        let pos = Pos { x, y };
-        assert!(w.loot_bag(pos, Some(7), rewards.clone()).is_err());
-        let existing: BTreeSet<_> = w.entities.keys().copied().collect();
-        w.loot_bags(pos, Some(7), &rewards).unwrap();
-        let bags: Vec<_> = w
+        assert!(chest.published && chest.items.len() == 8 && world.walkable(chest.pos));
+        assert_eq!((chest.pos.x.fract(), chest.pos.y.fract()), (0.5, 0.5));
+        assert_eq!((root.pos.x.fract(), root.pos.y.fract()), (0., 0.));
+        assert!(root.pos.distance(chest.pos) > 6.);
+        let assert_native = |pos: Pos, ground: u8, added: Option<i32>| {
+            let index = pos.y as usize * 192 + pos.x as usize;
+            let actual = &world.map.cells[index];
+            let before = &original.cells[index];
+            assert_eq!(
+                (
+                    actual.ground,
+                    actual.object,
+                    &actual.config,
+                    actual.terrain,
+                    actual.region
+                ),
+                (
+                    ground,
+                    before.object,
+                    &before.config,
+                    before.terrain,
+                    before.region
+                ),
+                "seed {seed}"
+            );
+            let native = &world.entities[&native_ids[index]];
+            assert_eq!(
+                (native.kind, native.name.as_str(), native.size),
+                (0x105, "native", 137)
+            );
+            assert_eq!((native.pos.x, native.pos.y), (pos.x, pos.y));
+            assert!(
+                matches!(&native.state, entity_store::EntityState::Shared(t) if Arc::ptr_eq(t, &template))
+            );
+            assert_eq!(
+                world.cells.ids(index).len(),
+                1 + usize::from(added.is_some())
+            );
+            assert!(world.cells.ids(index).contains(&native.id));
+            if let Some(id) = added {
+                assert!(world.cells.ids(index).contains(&id));
+            }
+        };
+        assert_native(chest.pos, 0x47, Some(chest.id));
+        let wall_sites: Vec<_> = world
             .entities
             .values()
-            .filter(|e| !existing.contains(&e.id))
+            .filter(|e| e.kind == 0x122)
+            .map(|e| (e.id, e.pos))
             .collect();
-        assert_eq!(bags.len(), 2);
-        assert!(bags.iter().all(|e| {
-            e.items.len() == 8
-                && e.accessible(7)
-                && !e.accessible(8)
-                && e.drop_slots
-                    == e.items
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, item)| **item >= 0)
-                        .map(|(slot, _)| slot)
-                        .collect()
-        }));
-        let items: Vec<_> = bags
-            .into_iter()
-            .flat_map(|e| e.items.iter().copied().filter(|i| *i >= 0))
-            .collect();
-        assert_eq!(items, rewards);
-    }
-    #[test]
-    fn pending_save_dead_quarantined_and_disconnected_recipients_do_not_duplicate_transfer() {
-        let mut d = super::super::tests::directory();
-        let (pending, _pending_rx) = recipient(&mut d, 1);
-        let (dead, _) = recipient(&mut d, 2);
-        let (failed, _) = recipient(&mut d, 3);
-        let (gone, _) = recipient(&mut d, 4);
-        let (disconnected, disconnected_rx) = recipient(&mut d, 5);
-        drop(disconnected_rx);
-        let heroes = arm(&mut d);
-        defeat(&mut d, heroes);
-        d.tick = 1200;
-        d.endgame_step();
-        d.tick = 1640;
-        d.endgame_step();
-        let w = d.worlds.get_mut(&-3).unwrap();
-        w.players.get_mut(&pending).unwrap().pending = true;
-        w.players.get_mut(&dead).unwrap().character.hp = 0;
-        w.poison(failed, "fixture persistence failure".into())
-            .unwrap();
-        w.players.remove(&gone);
-        assert!(
-            d.forced_transfer_candidates()
-                .into_iter()
-                .all(|id| d.forced_transfer(id).unwrap().is_none())
+        for &(id, pos) in &wall_sites {
+            assert_native(pos, 0x60, Some(id));
+            assert!(
+                world.entities[&id].hp > 0 && world.entities[&id].published && !world.walkable(pos)
+            );
+            walls += 1;
+        }
+        for (i, _) in world
+            .map
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.ground == 0xcb)
+        {
+            let pos = Pos {
+                x: (i % 192) as f32 + 0.5,
+                y: (i / 192) as f32 + 0.5,
+            };
+            assert_native(pos, 0xcb, None);
+            assert!(world.walkable(pos));
+            bridges += 1;
+        }
+        assert_native(
+            Pos {
+                x: root.pos.x + 0.5,
+                y: root.pos.y + 0.5,
+            },
+            0x47,
+            Some(root.id),
         );
-        assert!(d.worlds.contains_key(&-3));
-        assert!(d.worlds[&-3].players.contains_key(&disconnected));
-        d.worlds
-            .get_mut(&-3)
-            .unwrap()
-            .players
-            .get_mut(&pending)
-            .unwrap()
-            .pending = false;
-        let transfers: Vec<_> = d
-            .forced_transfer_candidates()
-            .into_iter()
-            .filter_map(|id| d.forced_transfer(id).unwrap())
-            .collect();
-        assert_eq!(transfers.len(), 1);
-        assert_eq!(transfers[0].player, pending);
-        assert!(d.forced_transfer_candidates().is_empty());
+        let area = world.setpieces[0];
+        witnessed.insert((
+            area.width,
+            area.height,
+            ((chest.pos.x - area.x as f32) * 2.) as i32,
+            ((chest.pos.y - area.y as f32) * 2.) as i32,
+        ));
+        if let Some((wall, pos)) = wall_sites.first().copied() {
+            let index = pos.y as usize * 192 + pos.x as usize;
+            world.damage_enemy(-1, wall, 1000, true, &[], None).unwrap();
+            assert!(!world.entities.contains_key(&wall) && world.walkable(pos));
+            assert_eq!(world.cells.ids(index), &[native_ids[index]]);
+            let cell = &world.map.cells[index];
+            assert_eq!(
+                (cell.ground, cell.object, cell.config.as_str()),
+                (0x60, Some(0x105), "name:native;size:137")
+            );
+            assert!(
+                matches!(&world.entities[&native_ids[index]].state, entity_store::EntityState::Shared(t) if Arc::ptr_eq(t, &template))
+            );
+        }
     }
+    assert!(bridges > 0 && walls > 0);
+    assert_eq!(
+        witnessed,
+        BTreeSet::from([
+            (31, 40, 31, 55),
+            (40, 31, 25, 31),
+            (31, 40, 31, 25),
+            (40, 31, 55, 31)
+        ])
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn landmark_hero_boundaries_fit_published_layouts() {
+    let data = std::path::Path::new("data");
+    let content = Arc::new(Content::load(data).unwrap());
+    let mut cyclops_anchors = BTreeSet::new();
+    for source in crate::terrain::realms::sources(data).unwrap() {
+        for counts in [[3, 4], [4, 6]] {
+            let birth_map = source.open(&content).unwrap();
+            let mut world = World::new(content.clone(), birth_map.clone()).unwrap();
+            world.realm_layout = Some(source.name().to_owned());
+            world.rng = rand::rngs::StdRng::seed_from_u64(12351);
+            for (kind, terrains, count) in [
+                (HEROES[0], &[1][..], counts[0]),
+                (HEROES[1], &[3, 4][..], counts[1]),
+            ] {
+                world
+                    .populate_landmark_heroes(kind, terrains, count)
+                    .unwrap();
+                assert_eq!(
+                    world.entities.values().filter(|e| e.kind == kind).count(),
+                    count,
+                    "{}: {kind:#x}",
+                    source.name()
+                );
+            }
+            let ids = world.hero_identities();
+            assert_eq!(ids.len(), counts.iter().sum::<usize>());
+            for id in &ids {
+                let e = &world.entities[id];
+                assert!(e.published && e.hp > 0 && e.quest.is_none() && e.camp.is_none());
+                if e.kind == HEROES[1] {
+                    let area = world
+                        .setpieces
+                        .iter()
+                        .find(|a| a.distance(e.pos) == 0.)
+                        .unwrap();
+                    let chest = world
+                        .entities
+                        .values()
+                        .find(|c| c.kind == 0x501 && area.distance(c.pos) == 0.)
+                        .unwrap();
+                    assert_eq!((chest.pos.x.fract(), chest.pos.y.fract()), (0.5, 0.5));
+                    assert!(world.walkable(chest.pos));
+                    for pos in [chest.pos, e.pos] {
+                        let index = pos.y as usize * world.map.width as usize + pos.x as usize;
+                        let original = &birth_map.cells[index];
+                        let current = &world.map.cells[index];
+                        assert_eq!(
+                            (
+                                current.ground,
+                                current.object,
+                                &current.config,
+                                current.terrain,
+                                current.region
+                            ),
+                            (
+                                original.ground,
+                                original.object,
+                                &original.config,
+                                original.terrain,
+                                original.region
+                            )
+                        );
+                    }
+                    let local = match (
+                        area.width,
+                        area.height,
+                        ((chest.pos.x - area.x as f32) * 2.) as i32,
+                        ((chest.pos.y - area.y as f32) * 2.) as i32,
+                    ) {
+                        (31, 40, 31, 55) => (15, 20),
+                        (40, 31, 25, 31) => (19, 15),
+                        (31, 40, 31, 25) => (15, 19),
+                        (40, 31, 55, 31) => (20, 15),
+                        other => panic!("unexpected rotated Castle/chest {other:?}"),
+                    };
+                    let expected = ((area.x + local.0) as f32, (area.y + local.1) as f32);
+                    assert_eq!((e.pos.x, e.pos.y), expected, "{}: Cyclops", source.name());
+                    assert_eq!((e.home.x, e.home.y), expected);
+                    assert!(
+                        world.walkable(e.pos)
+                            && matches!(world.map.cell(e.pos.x, e.pos.y).unwrap().terrain, 3 | 4)
+                    );
+                    let index = e.pos.y as usize * world.map.width as usize + e.pos.x as usize;
+                    assert!(world.cells.ids(index).contains(id));
+                    assert!(e.pos.distance(chest.pos) > 6. && chest.items.len() == 8);
+                    cyclops_anchors.insert(local);
+                }
+                assert!(
+                    ids.iter()
+                        .filter(|other| *other != id)
+                        .all(|other| e.pos.distance(world.entities[other].pos) >= 32.)
+                );
+            }
+            let mut cycle = RealmCycle::new(ids.clone()).unwrap();
+            for id in ids {
+                assert!(cycle.defeated(id, 1000));
+                assert!(!cycle.defeated(id, 1000));
+            }
+            assert!(
+                matches!(cycle.stage, RealmStage::Closing { deadline } if deadline == 1000 + crate::endgame::CLOSE_DELAY_MS)
+            );
+        }
+    }
+    assert_eq!(
+        cyclops_anchors,
+        BTreeSet::from([(15, 20), (19, 15), (15, 19), (20, 15)])
+    );
 }

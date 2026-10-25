@@ -8,9 +8,10 @@ impl World {
     pub(super) fn midland_movement(
         &self,
         id: i32,
-        target: Pos,
+        target: impl Into<Option<Pos>>,
         elapsed: u64,
     ) -> Result<(Motion, f32)> {
+        let target = target.into();
         let e = &self.entities[&id];
         if e.pos.distance(e.home) > 16. {
             return Ok((
@@ -26,9 +27,12 @@ impl World {
             return Ok(chase(4., 10., 2.));
         }
         let c = &self.camps[e.camp.context("inland family member lacks its camp")?];
-        let leader = self.population[c.start]
-            .entity
-            .filter(|id| self.entities.contains_key(id));
+        let owner = c.family.owner(e.kind);
+        let leader = if matches!(e.kind, 0x63e | 0x64f) {
+            Some(id)
+        } else {
+            self.camp_member(id, owner)?
+        };
         let orphan = leader.is_none();
         if orphan {
             return Ok((
@@ -43,7 +47,11 @@ impl World {
         if leader != Some(id) && e.pos.distance(self.entities[&leader.unwrap()].pos) > 12. {
             return Ok((
                 Motion::Protect {
-                    anchor: Anchor::CampLeader,
+                    anchor: if owner == c.family.leader {
+                        Anchor::CampLeader
+                    } else {
+                        Anchor::CampMember(owner)
+                    },
                     distance: 6.,
                 },
                 12.,
@@ -53,7 +61,7 @@ impl World {
             0x61f if elapsed % 5000 >= 2500 => (Motion::Wander, 4.),
             0x61f => chase(10., 15., 1.),
             0x61c | 0x61e => {
-                if e.pos.distance(target) < 10. {
+                if target.is_some_and(|p| e.pos.distance(p) < 10.) {
                     chase(10., 10., 1.)
                 } else {
                     (
@@ -66,8 +74,8 @@ impl World {
                 }
             }
             0x61d => {
-                if e.pos.distance(target) < 10. {
-                    chase(10., 10., 7.)
+                if target.is_some_and(|p| e.pos.distance(p) < 10.) {
+                    chase(10., 10., 4.)
                 } else {
                     (
                         Motion::Protect {
@@ -94,12 +102,34 @@ impl World {
             }
             0x62b => chase(12., 10., 7.),
             0x63a | 0x63b | 0x63e => chase(10., 10., 1.),
-            0x63c | 0x640 => chase(10., 10., 7.),
+            0x63c => chase(10., 10., 7.),
+            0x640 => chase(10., 10., 1.),
             0x63f => (Motion::Wander, 4.),
-            0x642 | 0x644 => chase(12., 10., 7.),
-            0x643 | 0x645 => chase(12., 10., 1.),
+            0x642 | 0x644 => (
+                Motion::Maintain {
+                    sight: 10.,
+                    distance: 8.,
+                },
+                4.,
+            ),
+            0x643 if elapsed % 3000 < 1500 => chase(12., 15., 2.),
+            0x643 => (
+                Motion::Protect {
+                    anchor: Anchor::CampLeader,
+                    distance: 2.,
+                },
+                12.,
+            ),
+            0x645 => (
+                Motion::Maintain {
+                    sight: 10.,
+                    distance: 8.,
+                },
+                4.,
+            ),
             0x647 | 0x648 => chase(12., 10., 7.),
-            0x649 | 0x650 => chase(10., 10., 7.),
+            0x649 => chase(10., 10., 7.),
+            0x650 => chase(10., 10., 1.),
             0x64a | 0x64c | 0x64d => chase(12., 10., 7.),
             0x64b => chase(12., 7., 1.),
             0x64f => chase(15., 10., 7.),
@@ -107,17 +137,17 @@ impl World {
             0x900 | 0x902 => {
                 if self.camp_member(id, 0x901)?.is_some() {
                     (
-                        Motion::Orbit {
+                        Motion::StrictOrbit {
                             anchor: Anchor::CampMember(0x901),
-                            radius: 3.,
+                            radius: 2.,
                         },
-                        if e.kind == 0x900 { 10. } else { 1. },
+                        6.,
                     )
                 } else {
                     (Motion::Wander, 1.)
                 }
             }
-            0x901 => (Motion::Wander, 1.),
+            0x901 => (Motion::Wander, 0.5),
             _ => bail!("unsupported inland family movement {:#x}", e.kind),
         })
     }
@@ -126,13 +156,12 @@ impl World {
             .camp
             .context("Shield Orc has no command camp")?;
         Ok(self
-            .entities
-            .values()
+            .actors()
             .filter(|e| e.camp == Some(camp) && matches!(e.kind, 0x900..=0x902))
             .map(|e| e.id)
             .collect())
     }
-    fn flash_inland(&self, id: i32, color: u32, period: f32, cycles: f32) {
+    pub(super) fn flash_inland(&self, id: i32, color: u32, period: f32, cycles: f32) {
         let mut out = Writer::new();
         out.u8(15)
             .i32(id)
@@ -147,7 +176,7 @@ impl World {
     }
     pub(super) fn shield_burst(&self, id: i32) -> bool {
         let e = &self.entities[&id];
-        matches!(e.kind, 0x900..=0x902)
+        e.kind == 0x900
             && e.stage != Some(3)
             && e.camp.is_some()
             && self
@@ -190,10 +219,12 @@ impl World {
         );
         if kind == 0x900 && hp < 500 && e.expires.is_none() {
             let e = self.entities.get_mut(&id).unwrap();
-            e.expires = Some(self.now + 1000);
+            e.expires
+                .set(Some(self.now + 1000), id, &mut self.timed_ids);
             for member in self.shield_members(id)? {
                 self.flash_inland(member, 0xffff0000, 0.5, 2.);
                 self.entities.get_mut(&member).unwrap().stage = Some(2);
+                self.npc_global_ids.insert(member);
             }
             tracing::debug!(
                 entity = id,
