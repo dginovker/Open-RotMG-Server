@@ -2,9 +2,9 @@
 
 `Directory::player_view(actor)` returns a read-only typed snapshot of the current world, actor, account and character, with simulation tick/time. Missing actors return an error, not an invented living character. It is an internal data boundary, not an in-process isolation sandbox or production HTTP endpoint.
 
-Own state includes HP/MP, level/experience, equipped and carried items, inventory revision and effective stats in `content::STATS` order. Lifecycle reports pending operations, death, departure, quarantine and whether the ordinary output sink is live, lost or detached. Other players expose public equipped slots only. Containers must be published and accessible through normal ownership/visibility rules.
+Own state includes HP/MP, level/experience, equipped and carried items, inventory revision, base stats and effective stats in `content::STATS` order. Lifecycle reports pending operations, death, departure, quarantine and whether the ordinary output sink is live, lost or detached. Other players expose public level and equipped slots, never carried inventory. Containers must be published and accessible through normal ownership/visibility rules.
 
-Map dimensions/name are native MAPINFO facts. Tiles contain only previously delivered ground and its movement multiplier. Visible objects supply their public blocking property. There is no whole-map collision mask, undiscovered terrain, enemy schedule, goal, damage RNG or hit ledger. Projectile snapshots contain observed trajectory/spec facts within sight, conservatively excluding shots at or before the shooter's latest discovery tick. Missing or expired observations are not proof that a route is clear.
+Map dimensions/name are native MAPINFO facts. Tiles contain only previously delivered ground and its movement multiplier. Visible objects supply their public blocking property. The own quest includes only its already-published native target. There is no whole-map collision mask, undiscovered terrain, enemy schedule, goal, damage RNG or hit ledger. Projectile snapshots contain observed trajectory/spec facts within sight, conservatively excluding shots at or before the shooter's latest discovery tick. Missing or expired observations are not proof that a route is clear.
 
 ## Results and stream lifetime
 

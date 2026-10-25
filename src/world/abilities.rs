@@ -44,6 +44,16 @@ enum Deployment {
     Bomb,
 }
 impl World {
+    // Client getTimer cooldowns continue during skipped physics ticks: https://github.com/moistosaurus/realm-cli/blob/a13c855dc5e09ee301fd0a66fcd303cfb5dff74e/src/com/company/assembleegameclient/objects/Player.as#L899-L917
+    pub(super) fn ability_clock_ms(&self) -> Result<u64> {
+        Ok(self
+            .clock
+            .now()
+            .checked_duration_since(self.attack_epoch)
+            .context("ability clock regressed")?
+            .as_millis() as u64)
+    }
+
     pub(super) fn spend_ability(
         &mut self,
         id: i32,
@@ -51,39 +61,43 @@ impl World {
         item: &Object,
         pos: Pos,
     ) -> Result<()> {
+        let now = self.ability_clock_ms()?;
         let p = &self.players[&id];
+        ensure!(
+            p.persistence_failure.is_none(),
+            "ability caster is unavailable"
+        );
         ensure!(
             p.character.alive
                 && !p.death_pending
                 && !p.departing
-                && !p.pending
+                && (!p.pending || p.progress_started)
                 && !p.paused
                 && p.persistence_failure.is_none(),
-            "ability caster is unavailable"
+            controller("ability caster is unavailable")
         );
         ensure!(
             slot.object == id && slot.kind == item.kind as i32 && p.character.items[1] == slot.kind,
-            "ability item does not match equipped item"
+            controller("ability item does not match equipped item")
         );
         ensure!(
             slot.slot == 1 && item.slot_type == self.content.get(p.character.class)?.slots[1],
-            "ability must be equipped by a compatible class"
+            controller("ability must be equipped by a compatible class")
         );
         ensure!(
             p.tx.as_ref()
                 .is_none_or(|tx| !*tx.lost.borrow() && !tx.packets.is_closed()),
-            "ability connection is closed"
+            controller("ability connection is closed")
         );
         ensure!(
             p.conditions(self.now) & crate::condition::bit(crate::condition::QUIET) == 0,
-            "cannot cast while Quiet"
+            controller("cannot cast while Quiet")
         );
-        ensure!(p.character.mp >= item.mana_cost, "not enough mana");
         ensure!(
-            p.last_ability
-                .is_none_or(|last| self.now >= last + item.cooldown_ms),
-            "ability cooldown"
+            p.character.mp >= item.mana_cost,
+            controller("not enough mana")
         );
+        ensure!(now >= p.ability_ready_ms, controller("ability cooldown"));
         let reach = item
             .abilities
             .iter()
@@ -100,15 +114,22 @@ impl World {
                 && pos.y.is_finite()
                 && p.pos.distance(pos) <= reach
                 && self.map.cell(pos.x, pos.y).is_some(),
-            "invalid ability target or target too far"
+            controller("invalid ability target or target too far")
         );
+        let ability_ready_ms = now
+            .checked_add(item.cooldown_ms)
+            .context("ability cooldown overflow")?;
         let p = self.players.get_mut(&id).unwrap();
         p.character.mp -= item.mana_cost;
-        p.last_ability = Some(self.now);
+        p.character.lifetime.ability_used = true;
+        p.ability_ready_ms = ability_ready_ms;
         tracing::info!(
             player = id,
             item = item.kind,
             mana_cost = item.mana_cost,
+            cooldown_ms = item.cooldown_ms,
+            ability_clock_ms = now,
+            simulation_time_ms = self.now,
             "ability activated"
         );
         Ok(())
@@ -132,13 +153,24 @@ impl World {
             .collect()
     }
     fn ability_enemies(&self, pos: Pos, radius: f32) -> Vec<i32> {
-        self.entities
-            .values()
+        let mut ids: Vec<_> = self
+            .near_entities(
+                Pos {
+                    x: pos.x - radius,
+                    y: pos.y - radius,
+                },
+                Pos {
+                    x: pos.x + radius,
+                    y: pos.y + radius,
+                },
+            )
             .filter(|e| {
                 e.hp > 0 && self.content.objects[&e.kind].enemy && e.pos.distance(pos) <= radius
             })
             .map(|e| e.id)
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     }
     fn ability_effect(&self, kind: u8, owner: i32, a: Pos, b: Pos, color: u32) {
         let mut out = Writer::new();
@@ -170,7 +202,7 @@ impl World {
                 + self.ability_state.objects.len()
                 + item.abilities.len()
                 <= MAX_ACTIVE,
-            "active ability budget exhausted"
+            controller("active ability budget exhausted")
         );
         let origin = self.players[&id].pos;
         for effect in &item.abilities {
@@ -178,7 +210,7 @@ impl World {
                 Ability::Shoot => {
                     ensure!(
                         self.players[&id].controller == Controller::Human,
-                        "projectile abilities require native reports"
+                        controller("projectile abilities require native reports")
                     );
                     ensure!(
                         (1..=5).contains(&item.shots)
@@ -196,11 +228,11 @@ impl World {
                 Ability::Teleport { distance } => {
                     ensure!(
                         origin.distance(pos) <= *distance && self.walkable(pos),
-                        "teleport target is blocked or outside ability range"
+                        controller("teleport target is blocked or outside ability range")
                     );
                 }
                 Ability::Trap { .. } => {
-                    ensure!(self.walkable(pos), "trap target is blocked");
+                    ensure!(self.walkable(pos), controller("trap target is blocked"));
                     self.content.get(0x711)?;
                 }
                 Ability::Decoy { .. } => {
@@ -435,8 +467,9 @@ impl World {
                     == 0
         };
         let first = self
-            .entities
-            .values()
+            .ability_enemies(origin, 14.)
+            .into_iter()
+            .map(|id| &self.entities[&id])
             .filter(eligible)
             .filter(|e| {
                 origin.distance(e.pos) <= 14.
@@ -454,8 +487,9 @@ impl World {
             while chain.len() < maximum {
                 let from = self.entities[chain.last().unwrap()].pos;
                 let next = self
-                    .entities
-                    .values()
+                    .ability_enemies(from, 10.)
+                    .into_iter()
+                    .map(|id| &self.entities[&id])
                     .filter(eligible)
                     .filter(|e| !chain.contains(&e.id) && from.distance(e.pos) <= 10.)
                     .min_by(|a, b| from.distance(a.pos).total_cmp(&from.distance(b.pos)))
@@ -511,6 +545,12 @@ impl World {
             .clone();
         let p = self.players.get_mut(&id).unwrap();
         p.character.shots += 20;
+        p.character.lifetime.shots = p
+            .character
+            .lifetime
+            .shots
+            .checked_add(20)
+            .context("lifetime ability shots overflow")?;
         let mut messages = Vec::new();
         for i in 0..20 {
             let bullet = p.server_bullet;
@@ -529,6 +569,7 @@ impl World {
                 damage,
                 spec: spec.clone(),
                 hit: BTreeSet::new(),
+                hit_enemy: false,
             });
             let mut out = Writer::new();
             out.u8(bullet)
@@ -543,7 +584,8 @@ impl World {
         for body in messages {
             for (peer, p) in &mut self.players {
                 if p.known.contains(&id)
-                    && (*peer != id || native_hits::expect_shoot_ack(p, vec![]))
+                    && (*peer == id || p.pos.distance(pos) <= 20.)
+                    && (*peer != id || native_hits::expect_shoot_ack(p, vec![], &self.clock))
                 {
                     send(p, 13, body.clone());
                 }
@@ -774,5 +816,57 @@ impl World {
             }
             self.ability_state.objects.insert(id, object);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ability_cooldown_uses_elapsed_unpaused_time_not_world_steps() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let content = Arc::new(Content::load(&data).unwrap());
+        let map = Arc::new(Map::load(&data.join("tutorial.wmap"), &content).unwrap());
+        let mut world = World::new(content, map).unwrap();
+        let character: Character = serde_json::from_value(serde_json::json!({
+            "schema":1,"lifetime":crate::store::FameLifetime::complete(),
+            "class":0x30e,"base":[670,385,75,25,50,75,40,60],
+            "id":1,"account":1,"name":"Cooldown","level":20,"exp":0,
+            "fame":0,"hp":670,"mp":385,"revision":0,"alive":true,
+            "items":[-1,0xa2e,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1]
+        }))
+        .unwrap();
+        let id = world.enter(character, None).unwrap();
+        let pos = world.players[&id].pos;
+        let item = world.content.get(0xa2e).unwrap().clone();
+        assert_eq!(item.cooldown_ms, 500);
+        let slot = Slot {
+            object: id,
+            slot: 1,
+            kind: 0xa2e,
+        };
+        world.spend_ability(id, slot, &item, pos).unwrap();
+        let mp = world.players[&id].character.mp;
+        assert!(
+            world
+                .spend_ability(id, slot, &item, pos)
+                .unwrap_err()
+                .to_string()
+                .contains("ability cooldown")
+        );
+        assert_eq!(world.players[&id].character.mp, mp);
+        world.clock.set_paused(true);
+        std::thread::sleep(Duration::from_millis(550));
+        assert!(world.spend_ability(id, slot, &item, pos).is_err());
+        world.clock.set_paused(false);
+        assert!(world.spend_ability(id, slot, &item, pos).is_err());
+        std::thread::sleep(Duration::from_millis(550));
+        assert_eq!(world.now, 0);
+        world
+            .spend_ability(id, slot, &item, pos)
+            .expect("real cooldown elapsed despite no simulation ticks");
+        assert_eq!(world.players[&id].character.mp, mp - item.mana_cost);
+        assert!(world.spend_ability(id, slot, &item, pos).is_err());
     }
 }

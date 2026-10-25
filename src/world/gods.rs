@@ -9,23 +9,13 @@ pub(super) const GODS: &[u16] = &[
 pub(super) const CONSTRUCTS: &[u16] = &[0x905, 0x906, 0x907];
 
 impl World {
-    pub(super) fn populate_godlands(&mut self, candidates: &[Pos]) -> Result<()> {
-        self.populate_families(1, candidates, &[0x652, 0x652, 0x905])?;
-        self.populate_solos(
-            1,
-            candidates,
-            &[
-                0x651, 0x654, 0x655, 0x656, 0x657, 0x658, 0x659, 0x6d8, 0x651, 0x654, 0x655, 0x656,
-                0x657, 0x658, 0x659, 0x6d8, 0x91a,
-            ],
-        )?;
-        ensure!(
-            self.population_count(1) == 28,
-            "Godlands initial body budget changed"
-        );
-        Ok(())
-    }
-    pub(super) fn god_movement(&self, id: i32, target: Pos, elapsed: u64) -> Result<(Motion, f32)> {
+    pub(super) fn god_movement(
+        &self,
+        id: i32,
+        target: impl Into<Option<Pos>>,
+        elapsed: u64,
+    ) -> Result<(Motion, f32)> {
+        let target = target.into();
         let e = &self.entities[&id];
         if e.pos.distance(e.home) > 24. {
             return Ok((
@@ -56,12 +46,13 @@ impl World {
                     (Motion::Wander, 4.)
                 }
             }
+            // Legacy orbit constructors take radius first; Swirling's center never follows a player.
             0x905 => (
                 Motion::Orbit {
-                    anchor: Anchor::Player,
-                    radius: 5.,
+                    anchor: Anchor::Home,
+                    radius: 2.,
                 },
-                2.,
+                5.,
             ),
             0x906 | 0x907 => {
                 let camp = &self.camps[e.camp.context("construct lacks its trio")?];
@@ -72,9 +63,9 @@ impl World {
                     (
                         Motion::Orbit {
                             anchor: Anchor::CampLeader,
-                            radius: 5.,
+                            radius: 4.,
                         },
-                        4.,
+                        5.,
                     )
                 } else {
                     (Motion::Wander, 8.)
@@ -88,20 +79,16 @@ impl World {
                 2000..4000 => (
                     Motion::Orbit {
                         anchor: Anchor::Player,
-                        radius: 8.,
-                    },
-                    5.,
-                ),
-                _ => (
-                    Motion::Orbit {
-                        anchor: Anchor::Player,
-                        radius: e.pos.distance(target).max(0.1),
+                        radius: 5.,
                     },
                     8.,
                 ),
+                _ => (Motion::Tangential, 8.),
             },
             kind if GODS.contains(&kind) => {
-                if e.pos.distance(target) > 7. {
+                // Pursuit is shorter than firing (White 9/10, Medusa 7/12): https://github.com/trapped/rotmg_svr/blob/593e490803fe0ad168ead408cacd5287d778acfe/wServer/logic/db/BehaviorDb.Mountain.cs
+                let sight = if kind == 0x651 { 9. } else { 7. };
+                if target.is_none_or(|p| e.pos.distance(p) > sight) {
                     (Motion::Wander, 4.)
                 } else {
                     chase(
@@ -110,7 +97,7 @@ impl World {
                             0x659 => 4.,
                             _ => 6.,
                         },
-                        7.,
+                        sight,
                         4.,
                     )
                 }
@@ -130,13 +117,14 @@ impl World {
             let dying = hp < 400;
             if dying && expiry.is_none() {
                 let e = self.entities.get_mut(&id).unwrap();
-                e.expires = Some(self.now + 3000);
+                e.expires
+                    .set(Some(self.now + 1000), id, &mut self.timed_ids);
                 e.next_shot = self.now;
                 let mut out = Writer::new();
                 out.u8(15)
                     .i32(id)
                     .f32(0.3)
-                    .f32(10.)
+                    .f32(3.)
                     .f32(0.)
                     .f32(0.)
                     .u32(0xffff0000);
@@ -149,7 +137,7 @@ impl World {
                 }
                 tracing::debug!(
                     entity = id,
-                    deadline = self.now + 3000,
+                    deadline = self.now + 1000,
                     "Djinn self-destruction telegraphed"
                 );
             }
@@ -163,7 +151,7 @@ impl World {
         if CONSTRUCTS.contains(&kind) {
             if kind != 0x905 && hp < 400 && self.entities[&id].expires.is_none() {
                 let e = self.entities.get_mut(&id).unwrap();
-                e.expires = Some(self.now + 50);
+                e.expires.set(Some(self.now + 50), id, &mut self.timed_ids);
                 e.next_shot = self.now;
                 tracing::debug!(entity = id, "wounded construct bursts and withdraws");
             }
@@ -206,6 +194,27 @@ impl World {
         if matches!(e.kind, 0x652 | 0x656 | 0x658) && e.pos.distance(target) > 10. {
             shots.retain(|(index, _)| *index != 1);
         }
+        self.predict_enemy_shots(id, target, &mut shots, |index| match (e.kind, index) {
+            (0x651 | 0x655 | 0x658, _) | (0x652 | 0x656 | 0x6d8 | 0x640 | 0x649, 1) => 1.,
+            (0x656 | 0x649, 0) => 0.5,
+            (0x609, _) if elapsed % 6000 < 2000 => 0.3,
+            (0x609, _) if elapsed % 6000 < 4000 => 0.5,
+            _ => 0.,
+        })?;
+        Ok(shots)
+    }
+    pub(super) fn predict_enemy_shots(
+        &self,
+        id: i32,
+        target: Pos,
+        shots: &mut [(u8, f32)],
+        factor: impl Fn(u8) -> f32,
+    ) -> Result<()> {
+        if shots.is_empty() {
+            return Ok(());
+        }
+        let e = &self.entities[&id];
+        let heading = (target.y - e.pos.y).atan2(target.x - e.pos.x);
         let velocity = if let Some(p) = self
             .players
             .values()
@@ -224,13 +233,8 @@ impl World {
             );
             Pos { x: 0., y: 0. }
         };
-        for (index, angle) in &mut shots {
-            let factor = match (e.kind, *index) {
-                (0x651 | 0x652 | 0x655 | 0x658 | 0x650 | 0x64f, _)
-                | (0x656 | 0x6d8 | 0x640 | 0x649, 1) => 1.,
-                (0x656 | 0x649, 0) => 0.5,
-                _ => 0.,
-            };
+        for (index, angle) in shots.iter_mut() {
+            let factor = factor(*index);
             if factor == 0. {
                 continue;
             }
@@ -244,6 +248,6 @@ impl World {
             };
             *angle += (aim.y - e.pos.y).atan2(aim.x - e.pos.x) - heading;
         }
-        Ok(shots)
+        Ok(())
     }
 }
