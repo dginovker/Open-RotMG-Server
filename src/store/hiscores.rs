@@ -37,11 +37,11 @@ impl Store {
         self.call(move |db| {
             let tx = db.transaction()?;
             let registered: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM credentials WHERE account=?1)", [account], |r| r.get(0))?;
-            ensure!(registered, "register and sign in before linking Discord");
+            ensure!(registered, Rejected("register and sign in before linking Discord"));
             let linked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM discord_links WHERE account=?1)", [account], |r| r.get(0))?;
-            ensure!(!linked, "this game account is already linked");
+            ensure!(!linked, Rejected("this game account is already linked"));
             let previous: Option<i64> = tx.query_row("SELECT issued_at FROM discord_codes WHERE account=?1", [account], |r| r.get(0)).optional()?;
-            ensure!(previous.is_none_or(|t| time-t >= 60), "wait one minute before requesting another link code");
+            ensure!(previous.is_none_or(|t| time-t >= 60), Rejected("wait one minute before requesting another link code"));
             tx.execute("DELETE FROM discord_codes WHERE expires_at<=?1", [time])?;
             tx.execute("INSERT INTO discord_codes(account,hash,issued_at,expires_at) VALUES(?1,?2,?3,?4) ON CONFLICT(account) DO UPDATE SET hash=excluded.hash,issued_at=excluded.issued_at,expires_at=excluded.expires_at", params![account,hash,time,time+300])?;
             tx.commit()?;
@@ -50,7 +50,11 @@ impl Store {
         tracing::info!(account, "private Discord link code issued");
         Ok(code)
     }
-    pub async fn redeem_discord_code(&self, code: String, discord: String) -> Result<String> {
+    pub async fn redeem_discord_code(
+        &self,
+        code: String,
+        discord: String,
+    ) -> Result<(i32, String)> {
         discord_id(&discord)?;
         let hash = code_hash(&code)?;
         let time = now()?;
@@ -63,13 +67,16 @@ impl Store {
             ensure!(!conflict, "a game or Discord account is already linked; links are never silently replaced");
             tx.execute("INSERT INTO discord_links(account,discord_id) VALUES(?1,?2)", params![account,discord])?;
             tx.execute("DELETE FROM discord_codes WHERE account=?1", [account])?;
+            tx.execute("INSERT INTO discord_recovery(account,enabled_at,last_issued_at) VALUES(?1,?2,0) ON CONFLICT(account) DO NOTHING", params![account,time])?;
+            let rewarded = gold::grant(&tx, account, gold::DISCORD)?;
             tx.commit()?;
-            tracing::info!(account, "Discord account linked");
-            Ok(name)
+            tracing::info!(account, rewarded, reward=gold::DISCORD, "Discord account linked");
+            Ok((account, name))
         }).await
     }
     pub async fn hiscores(&self, living: Vec<Character>) -> Result<serde_json::Value> {
         let base = self.legacy_base;
+        let classes = self.classes.clone();
         self.call(move |db| {
             let tx = db.transaction()?;
             let mut records = std::collections::BTreeMap::<i32, serde_json::Value>::new();
@@ -78,14 +85,19 @@ impl Store {
                 for row in q.query_map([], |r| Ok((r.get::<_,i32>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,i64>(3)?)))? {
                     let (id,name,discord,balance)=row?;
                     ensure!(balance >= 0, "negative account fame");
-                    records.insert(id,serde_json::json!({"account":id,"name":name,"discord_id":discord,"base_fame":0,"total_fame":balance,"collection":0}));
+                    // Account stars sum class bests, not spendable fame: https://github.com/moistosaurus/realm-cli/blob/a13c855dc5e09ee301fd0a66fcd303cfb5dff74e/src/com/company/assembleegameclient/appengine/SavedCharactersList.as#L127-L139
+                    let (presentation, _) = read_presentation(&tx, id, base, &classes)?;
+                    records.insert(id,serde_json::json!({"account":id,"name":name,"discord_id":discord,"base_fame":0,"total_fame":balance,"collection":0,"quests":0,"stars":presentation.stars()}));
                 }
             }
             let mut characters = std::collections::BTreeMap::new();
             {
-                let mut q=tx.prepare("SELECT stats FROM characters WHERE alive=1 UNION ALL SELECT snapshot FROM deaths")?;
-                for raw in q.query_map([],|r|r.get::<_,String>(0))? {
-                    let c=decode_character(&raw?,base)?; characters.insert(c.id,c);
+                // Tombstones prevent stale world snapshots from restoring dead or deleted scores.
+                let mut q=tx.prepare("SELECT id,alive,stats FROM characters")?;
+                for row in q.query_map([],|r|Ok((r.get::<_,i32>(0)?,r.get::<_,bool>(1)?,r.get::<_,String>(2)?)))? {
+                    let (id,alive,raw)=row?;
+                    let mut c=decode_character(&raw,base)?; c.id=id; c.alive=alive;
+                    characters.insert(id,c);
                 }
             }
             for c in living {
@@ -93,10 +105,20 @@ impl Store {
                 characters.insert(c.id,c);
             }
             for c in characters.values() {
+                // Quests Completed is each character's assigned-quest kill count: https://github.com/moistosaurus/realm-src/blob/1855c017eab870d13f0b61b1cf0b9e66a01922ff/wServer/logic/FameCounter.cs#L81-L82
+                if let Some(row)=records.get_mut(&c.account) {
+                    let total=row["quests"].as_u64().context("invalid quest total")?;
+                    row["quests"]=total.checked_add(c.lifetime.qualified_quests).context("quest total overflow")?.into();
+                }
+            }
+            let mut living = Vec::new();
+            for c in characters.values().filter(|c| c.alive) {
                 if let Some(row)=records.get_mut(&c.account) {
                     ensure!(c.fame >= 0, "negative persisted fame for character {}", c.id);
                     let best=row["base_fame"].as_i64().context("invalid best fame")?;
                     if i64::from(c.fame)>best {row["base_fame"]=c.fame.into();}
+                    // Equipment only: inventories stay private.
+                    living.push(serde_json::json!({"account":c.account,"id":c.id,"class":c.class,"level":c.level,"exp":c.exp,"fame":c.fame,"stats":c.base,"equipment":c.items.get(..4).context("character without equipment slots")?,"tex1":c.tex1,"tex2":c.tex2,"created_at":c.created_at}));
                 }
             }
             {
@@ -106,7 +128,26 @@ impl Store {
                 }
             }
             tx.commit()?;
-            Ok(serde_json::json!({"updated_at":now()?,"players":records.into_values().collect::<Vec<_>>()}))
+            Ok(serde_json::json!({"updated_at":now()?,"players":records.into_values().collect::<Vec<_>>(),"characters":living}))
+        }).await
+    }
+    /// Player deaths from `since` (inclusive), oldest first, at most 500; bots and non-competitors never appear.
+    pub async fn graveyard(&self, since: i64) -> Result<serde_json::Value> {
+        let legacy_base = self.legacy_base;
+        self.call(move |db| {
+            let tx=db.transaction()?;
+            let mut deaths=Vec::new();
+            {
+                let mut q=tx.prepare("SELECT d.snapshot,d.receipt,d.killed_by,d.died_at FROM deaths d JOIN characters c ON c.id=d.character JOIN competitors k ON k.account=c.account WHERE d.died_at>=?1 AND NOT EXISTS(SELECT 1 FROM shore_bots b WHERE b.account=c.account) ORDER BY d.died_at,d.character LIMIT 500")?;
+                for row in q.query_map([since],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?)))? {
+                    let (raw,paid,killed_by,died_at)=row?;
+                    let receipt=death_awards::decode_receipt(&paid)?;
+                    let c=receipt.character(&raw,legacy_base)?;
+                    deaths.push(serde_json::json!({"account":c.account,"id":c.id,"name":c.name,"class":c.class,"level":c.level,"base_fame":receipt.base,"total_fame":receipt.total,"died_at":died_at,"killed_by":killed_by,"equipment":c.items.get(..4).context("death without equipment slots")?,"tex1":c.tex1,"tex2":c.tex2}));
+                }
+            }
+            tx.commit()?;
+            Ok(serde_json::json!({"deaths":deaths}))
         }).await
     }
     pub async fn collection(&self, account: i32) -> Result<serde_json::Value> {
@@ -124,182 +165,169 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
-    async fn private_registered_codes_expire_consume_once_and_never_replace_links() {
+    async fn characters_and_graveyard_list_only_competing_players() {
         let content = Content::load(Path::new("data")).unwrap();
-        let dir = std::env::temp_dir().join(format!("hiscores-link-{}", rand::random::<u64>()));
-        std::fs::create_dir(&dir).unwrap();
-        let s = Store::open(&dir.join("game.db"), &content).unwrap();
-        let guest = s.list("owned-guest".into()).await.unwrap();
-        assert!(s.issue_discord_code(guest.id).await.is_err());
-        s.register(
-            "owned-guest".into(),
-            "owner@example.org".into(),
-            "password123".into(),
-        )
-        .await
-        .unwrap();
-        s.compete(guest.id).await.unwrap();
-        let code = s.issue_discord_code(guest.id).await.unwrap();
-        assert!(s.issue_discord_code(guest.id).await.is_err());
-        assert!(
-            s.redeem_discord_code("wrong".into(), "1558662335076376578".into())
+        let path = std::env::temp_dir().join(format!(
+            "graveyard-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let store = Store::open(&path, &content).unwrap();
+        let mut owners = Vec::new();
+        for name in ["Player", "Shorebot", "Outsider"] {
+            let id = store
+                .register(
+                    format!("graveyard-{name}"),
+                    format!("{name}@example.invalid"),
+                    "fixture-password".into(),
+                )
                 .await
-                .is_err()
-        );
-        assert!(
-            s.redeem_discord_code(code.clone(), "not-an-id".into())
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            s.redeem_discord_code(code.clone(), "1558662335076376578".into())
-                .await
-                .unwrap(),
-            guest.name
-        );
-        assert!(
-            s.redeem_discord_code(code, "1558662335076376579".into())
-                .await
-                .is_err()
-        );
-        assert!(s.issue_discord_code(guest.id).await.is_err());
-        let scores = s.hiscores(vec![]).await.unwrap();
-        assert_eq!(scores["players"][0]["discord_id"], "1558662335076376578");
-        assert_eq!(
-            s.collection(guest.id).await.unwrap()["items"],
-            serde_json::json!([])
-        );
-        let other = s.list("other-owned-guest".into()).await.unwrap();
-        s.register(
-            "other-owned-guest".into(),
-            "other@example.org".into(),
-            "password123".into(),
-        )
-        .await
-        .unwrap();
-        let expired = s.issue_discord_code(other.id).await.unwrap();
-        s.call(|db| {
-            db.execute("UPDATE discord_codes SET expires_at=0,issued_at=0", [])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-        assert!(
-            s.redeem_discord_code(expired, "1558662335076376579".into())
-                .await
-                .is_err()
-        );
-        let fresh = s.issue_discord_code(other.id).await.unwrap();
-        assert!(
-            s.redeem_discord_code(fresh.clone(), "1558662335076376578".into())
-                .await
-                .is_err()
-        );
-        s.redeem_discord_code(fresh, "1558662335076376579".into())
+                .unwrap();
+            store.choose_name(id, name.into()).await.unwrap();
+            if name != "Outsider" {
+                store.compete(id).await.unwrap();
+            }
+            owners.push(id);
+        }
+        let bot = owners[1];
+        store
+            .call(move |db| {
+                db.execute(
+                    "INSERT INTO shore_bots(name,account) VALUES('fixture',?1)",
+                    [bot],
+                )?;
+                Ok(())
+            })
             .await
             .unwrap();
-        let restarted = Store::open(&dir.join("game.db"), &content).unwrap();
-        assert_eq!(
-            restarted.hiscores(vec![]).await.unwrap()["players"][0]["discord_id"],
-            "1558662335076376578"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
+        let mut live = Vec::new();
+        for owner in owners.iter().copied() {
+            // Each account has one slot, so the death comes first and frees it.
+            for alive in [false, true] {
+                let mut ch = store
+                    .create(owner, content.get(WIZARD).unwrap())
+                    .await
+                    .unwrap();
+                ch.level = 20;
+                ch.exp = 20000;
+                ch.fame = 70;
+                store.progress(ch.clone()).await.unwrap();
+                if alive {
+                    ch.fame = 90;
+                    live.push(ch);
+                } else {
+                    ch.alive = false;
+                    ch.hp = 0;
+                    store.death(ch, "fixture".into()).await.unwrap();
+                }
+            }
+        }
+        // Live world state wins over saved fame, and bots stay out even when online.
+        let scores = store.hiscores(live.clone()).await.unwrap();
+        let characters = scores["characters"].as_array().unwrap();
+        assert_eq!(characters.len(), 1);
+        assert_eq!(characters[0]["id"], live[0].id);
+        assert_eq!(characters[0]["fame"], 90);
+        assert_eq!(characters[0]["equipment"].as_array().unwrap().len(), 4);
+        let deaths = store.graveyard(0).await.unwrap();
+        let deaths = deaths["deaths"].as_array().unwrap();
+        assert_eq!(deaths.len(), 1);
+        assert_eq!(deaths[0]["account"], owners[0]);
+        assert_eq!(deaths[0]["base_fame"], 70);
+        assert_eq!(deaths[0]["killed_by"], "fixture");
+        let later = store.graveyard(i64::MAX).await.unwrap();
+        assert!(later["deaths"].as_array().unwrap().is_empty());
     }
+
     #[tokio::test]
-    async fn collection_and_inventory_commit_together_and_fame_deduplicates_deaths() {
+    async fn star_hiscores_match_retained_class_bests_not_wallet_or_uncommitted_fame() {
         let content = Content::load(Path::new("data")).unwrap();
-        let dir = std::env::temp_dir().join(format!("hiscores-progress-{}", rand::random::<u64>()));
-        std::fs::create_dir(&dir).unwrap();
-        let s = Store::open(&dir.join("game.db"), &content).unwrap();
-        let a = s.list("score-owner".into()).await.unwrap();
-        s.compete(a.id).await.unwrap();
-        assert_eq!(
-            s.hiscores(vec![]).await.unwrap()["players"],
-            serde_json::json!([])
-        );
-        s.register(
-            "score-owner".into(),
-            "scores@example.org".into(),
-            "password123".into(),
-        )
-        .await
-        .unwrap();
-        s.compete(a.id).await.unwrap();
-        let mut c = s.create(a.id, content.get(WIZARD).unwrap()).await.unwrap();
-        let write = |c: &Character| InventoryWrite {
-            account: c.account,
-            id: c.id,
-            revision: c.revision,
-            items: c.items.clone(),
-        };
-        assert_eq!(
-            s.collection(a.id).await.unwrap()["items"],
-            serde_json::json!([])
-        );
-        c.items[4] = 0xa22;
-        let revision = s
-            .exchange_collected(vec![write(&c)], None, Some(0xa22))
-            .await
-            .unwrap()[0];
-        assert!(
-            s.exchange_collected(vec![write(&c)], None, Some(0xa23))
+        let path = std::env::temp_dir().join(format!(
+            "star-hiscores-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let store = Store::open(&path, &content).unwrap();
+        let mut owners = Vec::new();
+        for name in ["Orion", "Lyra", "Nova"] {
+            let id = store
+                .register(
+                    format!("star-{name}"),
+                    format!("{name}@example.invalid"),
+                    "fixture-password".into(),
+                )
                 .await
-                .is_err()
-        );
-        assert_eq!(
-            s.collection(a.id).await.unwrap()["items"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        c.revision = revision;
-        c.revision = s
-            .exchange_collected(vec![write(&c)], None, Some(0xa22))
+                .unwrap();
+            store.choose_name(id, name.into()).await.unwrap();
+            store.compete(id).await.unwrap();
+            owners.push(id);
+        }
+        for (n, owner) in owners[..2].iter().copied().enumerate() {
+            for fame in [if n == 0 { 800 } else { 2000 }, 20] {
+                let mut ch = store
+                    .create(owner, content.get(WIZARD).unwrap())
+                    .await
+                    .unwrap();
+                ch.level = 20;
+                ch.exp = 20000;
+                ch.fame = fame;
+                ch.lifetime.qualified_quests = n as u64 + 3;
+                store.progress(ch.clone()).await.unwrap();
+                store.delete_character(owner, ch.id).await.unwrap();
+            }
+            let kind = if n == 0 { 0x310 } else { 0x300 };
+            let mut ch = store
+                .create_prepared(owner, content.get(kind).unwrap(), None)
+                .await
+                .unwrap();
+            ch.level = 20;
+            ch.exp = 20000;
+            ch.fame = if n == 0 { 150 } else { 20 };
+            store.progress(ch.clone()).await.unwrap();
+            if n == 0 {
+                ch.alive = false;
+                ch.hp = 0;
+                let id = ch.id;
+                store.death(ch, "fixture".into()).await.unwrap();
+                store
+                    .call(move |db| {
+                        db.execute(
+                            "UPDATE characters SET stats=json_set(stats,'$.fame',9999) WHERE id=?1",
+                            [id],
+                        )?;
+                        db.execute(
+                            "UPDATE account_fame SET balance=0 WHERE account=?1",
+                            [owner],
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        let mut pending = store
+            .create(owners[2], content.get(WIZARD).unwrap())
             .await
-            .unwrap()[0];
-        assert_eq!(
-            s.collection(a.id).await.unwrap()["items"]
+            .unwrap();
+        pending.fame = 2000;
+        pending.lifetime.qualified_quests = 5;
+        let guest = store.list("star-unregistered".into()).await.unwrap();
+        store.compete(guest.id).await.unwrap();
+        eprintln!("STAR_FIXTURE_DB={}", path.display());
+        let scores = store.hiscores(vec![pending]).await.unwrap();
+        assert_eq!(scores["players"].as_array().unwrap().len(), 3);
+        for (id, (expected, quests)) in owners.into_iter().zip([(7, 6), (6, 8), (0, 5)]) {
+            let row = scores["players"]
                 .as_array()
                 .unwrap()
-                .len(),
-            1
-        );
-        let mut live = c.clone();
-        live.fame = 100;
-        let mut invalid = live.clone();
-        invalid.fame = -1;
-        assert!(s.hiscores(vec![invalid]).await.is_err());
-        let scores = s.hiscores(vec![live.clone()]).await.unwrap();
-        assert_eq!(scores["players"][0]["base_fame"], 100);
-        assert_eq!(scores["players"][0]["total_fame"], 0);
-        c.fame = 50;
-        c.alive = false;
-        c.hp = 0;
-        s.death(c, "test enemy".into()).await.unwrap();
-        let scores = s.hiscores(vec![live]).await.unwrap();
-        assert_eq!(scores["players"][0]["base_fame"], 50);
-        assert_eq!(scores["players"][0]["total_fame"], 50);
-        let mut replacement = s.create(a.id, content.get(WIZARD).unwrap()).await.unwrap();
-        replacement.fame = 80;
-        let scores = s.hiscores(vec![replacement]).await.unwrap();
-        assert_eq!(scores["players"][0]["base_fame"], 80);
-        assert_eq!(scores["players"][0]["total_fame"], 50);
-        assert_eq!(scores["players"][0]["collection"], 1);
-        s.call(move |db| {
-            db.execute(
-                "INSERT INTO shore_bots(name,account) VALUES('test-bot',?1)",
-                [a.id],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            s.hiscores(vec![]).await.unwrap()["players"],
-            serde_json::json!([])
-        );
-        std::fs::remove_dir_all(dir).unwrap();
+                .iter()
+                .find(|row| row["account"] == id)
+                .unwrap();
+            assert_eq!(row["stars"], expected);
+            assert_eq!(row["quests"], quests);
+            assert_eq!(row["stars"], store.presentation(id).await.unwrap().stars());
+        }
     }
 }

@@ -3,12 +3,23 @@ www.openrotmg.org {
 }
 
 openrotmg.org {
-    encode zstd gzip
+    encode zstd gzip {
+        match {
+            header Content-Type application/*
+            header Content-Type text/*
+            header Content-Type font/*
+            header Content-Type image/svg+xml*
+            header Content-Type image/x-icon*
+            header Content-Type image/vnd.microsoft.icon*
+            header Content-Type multipart/bag*
+            header Content-Type multipart/mixed*
+        }
+    }
     header {
         X-Content-Type-Options nosniff
         Referrer-Policy strict-origin-when-cross-origin
     }
-    @recovery path /recover /recover/* /api/account/recover
+    @recovery path /recover /recover/* /link /link/* /api/account/recover /api/account/browser /api/account/browser/* /api/account/link/*
     header @recovery Cache-Control "no-store"
     header @recovery >Referrer-Policy "no-referrer"
     header @recovery Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -16,7 +27,7 @@ openrotmg.org {
     handle @private {
         respond "Development control is not public" 403
     }
-    @backend path /game /client.swf /legacy-api/* /vendor/* /sfx/* /health /api/hiscores /api/collection/* /api/account/recover /api/diagnostics/* /api/bug-reports/*
+    @backend path /game /client.swf /launcher.js /draw.html /native-texture-editor.swf /legacy-api/* /vendor/* /sfx/* /health /api/updates /api/hiscores /api/bots /api/bots/* /api/collection/* /api/account/recover /api/account/browser /api/account/browser/* /api/account/link/* /api/diagnostics/* /api/bug-reports/*
     handle @backend {
         reverse_proxy 127.0.0.1:18923 {
             header_up X-Forwarded-For {http.request.remote.host}

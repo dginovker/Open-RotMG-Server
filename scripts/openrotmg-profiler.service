@@ -1,0 +1,29 @@
+[Unit]
+Description=OpenRotMG bounded CPU flight recorder
+After=openrotmg.service
+BindsTo=openrotmg.service
+PartOf=openrotmg.service
+
+[Service]
+ExecStart=/usr/bin/python3 -u /opt/openrotmg/server/scripts/profile.py --service openrotmg --output /var/lib/openrotmg-profiler
+StateDirectory=openrotmg-profiler
+StateDirectoryMode=0700
+UMask=0077
+Environment=HOME=/var/lib/openrotmg-profiler
+Environment=PERF_CONFIG=/dev/null
+Nice=10
+MemoryMax=256M
+CPUAccounting=yes
+IOAccounting=yes
+TimeoutStopSec=30
+NoNewPrivileges=true
+# Debian's paranoid=3 gate requires SYS_ADMIN even with PERFMON; leave the host policy unchanged.
+CapabilityBoundingSet=CAP_PERFMON CAP_SYS_PTRACE CAP_SYS_ADMIN
+RestrictAddressFamilies=AF_UNIX
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/openrotmg-profiler
+
+[Install]
+WantedBy=openrotmg.service
