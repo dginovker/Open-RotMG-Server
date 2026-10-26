@@ -18,6 +18,79 @@ pub(super) struct ResetRequest {
     token: String,
     password: String,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AnnounceRequest {
+    text: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GoldRequest {
+    discord_id: String,
+    amount: i32,
+    request_id: String,
+    actor_id: String,
+}
+pub(super) async fn discord_gold(
+    State(a): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<GoldRequest>,
+) -> Response {
+    if let Some(response) = private_denial(&a, peer, &headers) {
+        return response;
+    }
+    json_result(
+        async {
+            // Finish publication even if Discord's HTTP deadline expires after the durable credit.
+            tokio::spawn(async move {
+                let (account, balance) = a
+                    .store
+                    .grant_discord_gold(
+                        request.discord_id,
+                        request.amount,
+                        request.request_id,
+                        request.actor_id,
+                    )
+                    .await?;
+                super::gold::sync(&a, account).await?;
+                Ok(serde_json::json!({"balance":balance}))
+            })
+            .await
+            .context("gold grant task failed")?
+        }
+        .await,
+    )
+}
+pub(super) async fn discord_announce(
+    State(a): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<AnnounceRequest>,
+) -> Response {
+    if let Some(response) = private_denial(&a, peer, &headers) {
+        return response;
+    }
+    json_result(
+        async {
+            let text = request.text.trim();
+            ensure!(!text.is_empty(), "Announcement text is empty.");
+            ensure!(
+                text.encode_utf16().count() <= 200,
+                "Announcements are limited to 200 characters."
+            );
+            ensure!(
+                !text.chars().any(char::is_control),
+                "Announcement text contains control characters."
+            );
+            let deliver = text.to_owned();
+            let players = a.world.directory(move |d| Ok(d.announce(&deliver))).await?;
+            tracing::info!(players, text, "announcement sent");
+            Ok(serde_json::json!({"players":players}))
+        }
+        .await,
+    )
+}
 pub(super) async fn discord_kick(
     State(a): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -46,6 +119,7 @@ pub(super) async fn discord_recover(
     if let Some(response) = private_denial(&a, peer, &headers) {
         return response;
     }
+    let _authentication = a.authentication.read().await;
     json_result(
         a.store
             .issue_reset(request.discord_id, request.code)
@@ -77,7 +151,7 @@ pub(super) async fn reset_password(
             a.store.reset_account(request.token.clone()).await?;
             let verifier = a.store.prepare_password(request.password).await?;
             // Fence authentication through its ownership claim, not just the credential lookup.
-            let _authentication = a.authentication.write().await;
+            let authentication = a.authentication.clone().write_owned().await;
             let account = a.store.reset_account(request.token.clone()).await?;
             a.kick(account).await?;
             ensure!(
@@ -87,12 +161,20 @@ pub(super) async fn reset_password(
                     .contains_key(&account),
                 "account ownership was not released"
             );
-            a.store.finish_reset(request.token, verifier).await?;
+            let _claim = a.claim(account)?;
+            super::lifecycle::account(&a, vec![account], "password_reset", move |a| async move {
+                let _authentication = authentication;
+                super::lifecycle::stage(Stage::Store);
+                a.store.finish_reset(request.token, verifier).await
+            })
+            .await?;
             Ok(serde_json::json!({"reset":true}))
         }
         .await,
     )
 }
 
+#[cfg(test)]
+mod gold_tests;
 #[cfg(test)]
 pub(crate) mod tests;

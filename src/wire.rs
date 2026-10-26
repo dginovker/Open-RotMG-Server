@@ -14,11 +14,21 @@ pub const PING: u8 = 6;
 pub const PONG: u8 = 16;
 pub const PLAYER_TEXT: u8 = 69;
 pub const TEXT: u8 = 25;
+pub const CREATE_GUILD: u8 = 15;
+pub const GUILD_RESULT: u8 = 58;
+pub const GUILD_INVITE: u8 = 8;
+pub const INVITED_TO_GUILD: u8 = 77;
+pub const JOIN_GUILD: u8 = 5;
+pub const CHANGE_GUILD_RANK: u8 = 40;
+pub const GUILD_REMOVE: u8 = 78;
 pub const ACCOUNT_LIST: u8 = 46;
 pub const EDIT_ACCOUNT_LIST: u8 = 53;
 pub const TELEPORT: u8 = 49;
+pub const BUY: u8 = 50;
+pub const BUY_RESULT: u8 = 27;
 pub const GOTO: u8 = 52;
 pub const SHOW_EFFECT: u8 = 56;
+pub const PLAY_SOUND: u8 = 44;
 pub const NOTIFICATION: u8 = 63;
 pub(crate) const MAX_FRAME: usize = 1_048_576;
 const CLIENT_OUT: &[u8] = &[
@@ -64,6 +74,9 @@ impl<'a> Reader<'a> {
     pub fn utf(&mut self) -> Result<String> {
         let n = u16::from_be_bytes(self.take(2)?.try_into()?) as usize;
         Ok(std::str::from_utf8(self.take(n)?)?.to_owned())
+    }
+    pub(crate) fn remaining(&self) -> &[u8] {
+        &self.data[self.pos..]
     }
     pub fn done(&self) -> Result<()> {
         ensure!(
@@ -139,6 +152,7 @@ impl Rc4 {
     }
 }
 
+#[derive(Clone)]
 pub struct Packet {
     pub id: u8,
     pub body: Vec<u8>,

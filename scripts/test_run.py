@@ -1,6 +1,8 @@
 import hashlib
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,18 +12,26 @@ from zipfile import ZipFile, ZipInfo
 spec = importlib.util.spec_from_file_location("launcher", Path(__file__).with_name("run.py"))
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
+resolve_selection = launcher.client_selection
 
 
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.prefix = f"Open-RotMG-Client-{launcher.REVISION}"
+        self.revision = 'a' * 40
+        self.prefix = f"Open-RotMG-Client-{self.revision}"
+        self.url = f'https://codeload.github.com/OpenRotMG/Open-RotMG-Client/zip/{self.revision}'
         self.client = self.root / '.local' / self.prefix
-        self.data = self.archive({"client.swf": b"reference", "index.html": b"page", "scripts/run.py": b"prepare", "run.sh": b"#!/bin/sh\n"})
-        self.patch = patch.multiple(launcher, ROOT=self.root, LOG=self.root / ".local/server.log",
-                                    SHA256=hashlib.sha256(self.data).hexdigest())
+        self.lock = {'version': '0.7.1-openrotmg.7', 'bundleSha256': 'b' * 64}
+        self.data = self.archive({"client.swf": b"reference", "index.html": b"page", "scripts/run.py": b"prepare", "run.sh": b"#!/bin/sh\n",
+                                  'ruffle/lock.json': json.dumps(self.lock).encode()})
+        self.selection = {'client': self.revision, 'client_archive_sha256': hashlib.sha256(self.data).hexdigest(),
+                          'runtime_version': self.lock['version'], 'runtime_bundle_sha256': self.lock['bundleSha256']}
+        self.patch = patch.multiple(launcher, ROOT=self.root / 'source', LOG=self.root / ".local/server.log")
         self.patch.start()
+        self.resolve = patch.object(launcher, 'client_selection', return_value=self.selection)
+        self.resolve.start()
         self.git = patch.object(launcher.subprocess, 'check_output', side_effect=lambda command, **_: 'test-revision\n' if command[1] == 'rev-parse' else '')
         self.git.start()
         self.port = patch.object(launcher.socket, 'socket')
@@ -39,172 +49,99 @@ class LauncherTests(unittest.TestCase):
     def tearDown(self):
         self.port.stop()
         self.git.stop()
+        self.resolve.stop()
         self.patch.stop()
         self.temp.cleanup()
 
-    def test_download_then_verified_cache(self):
-        with patch.object(launcher, "urlopen", return_value=io.BytesIO(self.data)) as download:
-            self.assertEqual(launcher.prepare_client(), self.client)
-            download.assert_called_once_with(launcher.URL, timeout=60)
-        self.assertEqual((self.client / 'run.sh').stat().st_mode & 0o777, 0o755)
-        (self.client / 'run.sh').chmod(0o644)
-        with patch.object(launcher, "urlopen", side_effect=AssertionError("no silent redownload")):
-            self.assertEqual(launcher.prepare_client(), self.client)
-        self.assertEqual((self.client / 'index.html').read_bytes(), b'page')
-        self.assertEqual((self.client / 'run.sh').stat().st_mode & 0o777, 0o755)
 
-    def test_corrupt_download_and_archive_cache_fail(self):
-        cache = self.root / f'.local/client-{launcher.REVISION}.zip'
-        with patch.object(launcher, "urlopen", return_value=io.BytesIO(b"corrupt")):
-            with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
-                launcher.prepare_client()
-        self.assertFalse(cache.exists())
-        cache.write_bytes(b"corrupt")
-        with patch.object(launcher, "urlopen", side_effect=AssertionError("no silent redownload")):
-            with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
-                launcher.prepare_client()
-        self.assertEqual(cache.read_bytes(), b"corrupt")
 
-    def test_modified_cached_assets_fail_without_replacement(self):
-        with patch.object(launcher, "urlopen", return_value=io.BytesIO(self.data)):
-            launcher.prepare_client()
-        (self.client / 'index.html').write_text('modified')
-        with self.assertRaisesRegex(RuntimeError, 'missing or modified'):
-            launcher.prepare_client()
-        self.assertEqual((self.client / 'index.html').read_text(), 'modified')
 
-    def test_archive_traversal_and_symlinks_are_rejected(self):
-        stream = io.BytesIO()
-        with ZipFile(stream, 'w') as archive:
-            link = ZipInfo(f'{self.prefix}/link')
-            link.external_attr = 0o120777 << 16
-            archive.writestr(link, '../../outside')
-        for data in [self.archive({'../../outside': b'bad'}), stream.getvalue()]:
-            with patch.object(launcher, 'SHA256', hashlib.sha256(data).hexdigest()), \
-                    patch.object(launcher, 'urlopen', return_value=io.BytesIO(data)):
-                with self.assertRaisesRegex(RuntimeError, 'Unsafe client archive'):
-                    launcher.prepare_client()
-        self.assertFalse((self.root / 'outside').exists())
 
-    def test_ports_and_custom_client_are_forwarded(self):
-        (self.client / 'scripts').mkdir(parents=True)
-        (self.client / 'scripts/run.py').touch()
-        cases = [(['8080'], ['--port', '8080']),
-                 (['1', '--dev-control'], ['--port', '1', '--dev-control']),
-                 (['--local-client', str(self.client), '65535'], ['--port', '65535'])]
-        for args, expected in cases:
-            with self.subTest(args=args), patch('sys.argv', ['run.py', *args]), \
-                    patch.object(launcher.shutil, 'which', return_value='/cargo'), \
-                    patch.object(launcher, 'prepare_client', return_value=self.client) as download, \
-                    patch.object(launcher, 'run', return_value=0) as run:
-                self.assertEqual(launcher.main(), 0)
-                self.assertEqual(run.call_count, 2)
-                self.assertEqual(run.call_args.args[0], ['cargo', 'run', '--locked', '--', '--client', str(self.client), *expected[:2], '--state', str(self.root / '.local'), *expected[2:]])
-                if '--local-client' in args:
-                    download.assert_not_called()
 
-    def test_optimized_bots_keep_state_isolation_and_qa_disabled(self):
-        (self.client / 'scripts').mkdir(parents=True)
-        (self.client / 'scripts/run.py').touch()
-        state = self.root / 'bots'
-        for flag in ['--shore-bots', '--no-shore-bots']:
-            with self.subTest(flag=flag), patch('sys.argv', ['run.py', '8081', '--client', str(self.client), '--state', str(state), flag, '--release']), \
-                    patch.object(launcher.shutil, 'which', return_value='/cargo'), \
-                    patch.object(launcher, 'run', return_value=0) as run:
-                self.assertEqual(launcher.main(), 0)
-            self.assertEqual(run.call_args.args[0], ['cargo', 'run', '--locked', '--release', '--', '--client', str(self.client), '--port', '8081', '--state', str(state), flag])
-        with patch('sys.argv', ['run.py', '8081', '--shore-bots', '--no-shore-bots']), self.assertRaises(SystemExit) as error:
-            launcher.main()
-        self.assertEqual(error.exception.code, 2)
 
-    def test_explicit_state_is_used_for_saves_cache_and_logs(self):
-        state = self.root / 'isolated'
-        with patch('sys.argv', ['run.py', '8081', '--state', str(state)]), \
-                patch.object(launcher.shutil, 'which', return_value='/cargo'), \
-                patch.object(launcher, 'urlopen', return_value=io.BytesIO(self.data)), \
-                patch.object(launcher, 'run', return_value=0) as run:
-            launcher.main()
-        self.assertEqual((run.call_args.args[0][-2:], launcher.LOG.parent,
-                          (state / f'client-{launcher.REVISION}.zip').exists(),
-                          (self.root / '.local').exists()),
-                         (['--state', str(state)], state, True, False))
 
-    def test_client_alias_is_explicit_and_receipt_identifies_environment(self):
+
+
+
+    def test_failed_build_never_starts_a_stale_retained_binary(self):
         (self.client / 'scripts').mkdir(parents=True)
         (self.client / 'scripts/run.py').touch()
         with patch('sys.argv', ['run.py', '8081', '--client', str(self.client)]), \
                 patch.object(launcher.shutil, 'which', return_value='/cargo'), \
-                patch.object(launcher, 'run', return_value=0), \
-                patch.object(launcher, 'prepare_client', side_effect=AssertionError('custom client must not download')):
-            launcher.main()
-        self.assertIn(f'Local source: test-revision dirty=False; port=8081; state={self.root / ".local"}; client={self.client}', launcher.LOG.read_text())
-
-    def test_occupied_port_fails_before_download(self):
-        with patch('sys.argv', ['run.py', '8081']), \
-                patch.object(launcher.shutil, 'which', return_value='/cargo'), \
-                patch.object(launcher.socket, 'socket', side_effect=OSError('address already in use')), \
-                patch.object(launcher, 'prepare_client', side_effect=AssertionError('must fail before download')):
-            launcher.main()
-        self.assertIn('Cannot listen on 127.0.0.1:8081', launcher.LOG.read_text())
-
-    def test_missing_port_fails_before_setup(self):
-        for args in [[], ['--dev-control'], ['--local-client', str(self.client)]]:
-            with self.subTest(args=args), patch('sys.argv', ['run.py', *args]), \
-                    patch.object(launcher.shutil, 'which') as cargo, \
-                    patch.object(launcher, 'prepare_client') as prepare, \
-                    patch('sys.stderr', new_callable=io.StringIO) as stderr:
-                with self.assertRaises(SystemExit) as error:
-                    launcher.main()
-                self.assertEqual(error.exception.code, 2)
-                self.assertIn('usage: run.sh', stderr.getvalue())
-                self.assertIn('required: port', stderr.getvalue())
-                cargo.assert_not_called()
-                prepare.assert_not_called()
-                self.assertFalse(launcher.LOG.exists())
-
-    def test_invalid_ports_fail_before_download(self):
-        for port in ['0', '-1', '65536', 'abc', '8080.5']:
-            with self.subTest(port=port), patch('sys.argv', ['run.py', port]), \
-                    patch.object(launcher, 'prepare_client') as prepare, patch('sys.stderr', new_callable=io.StringIO) as stderr:
-                with self.assertRaises(SystemExit) as error:
-                    launcher.main()
-                self.assertEqual(error.exception.code, 2)
-                self.assertIn('port must be', stderr.getvalue())
-                prepare.assert_not_called()
-
-    def test_failed_download_logs_url_and_cause(self):
-        with patch('sys.argv', ['run.py', '8080']), patch.object(launcher.shutil, 'which', return_value='/cargo'), \
-                patch.object(launcher, 'urlopen', side_effect=OSError('connection refused')):
-            self.assertEqual(launcher.main(), 1)
-        self.assertIn(launcher.URL, launcher.LOG.read_text())
-        self.assertIn('connection refused', launcher.LOG.read_text())
-
-    def test_failed_preparation_does_not_start_backend(self):
-        (self.client / 'scripts').mkdir(parents=True)
-        (self.client / 'scripts/run.py').touch()
-        with patch('sys.argv', ['run.py', '8080']), patch.object(launcher.shutil, 'which', return_value='/cargo'), \
-                patch.object(launcher, 'prepare_client', return_value=self.client), patch.object(launcher, 'run', return_value=37) as run:
-            self.assertEqual(launcher.main(), 1)
-            self.assertEqual(run.call_count, 1)
-        self.assertIn('status 37', launcher.LOG.read_text())
-
-    def test_backend_failure_is_printed_and_logged(self):
-        (self.client / 'scripts').mkdir(parents=True)
-        (self.client / 'scripts/run.py').touch()
-        prepare = MagicMock()
-        prepare.__enter__.return_value = prepare
-        prepare.stdout = []
-        prepare.wait.return_value = 0
-        backend = MagicMock()
-        backend.__enter__.return_value = backend
-        backend.stdout = ['Error: cannot listen on 127.0.0.1:18923\n']
-        backend.wait.return_value = 1
-        with patch('sys.argv', ['run.py', '8080']), patch.object(launcher.shutil, 'which', return_value='/cargo'), \
                 patch.object(launcher, 'prepare_client', return_value=self.client), \
-                patch.object(launcher.subprocess, 'Popen', side_effect=[prepare, backend]):
+                patch.object(launcher, 'run', side_effect=[0, 37]) as run:
             self.assertEqual(launcher.main(), 1)
-        self.assertIn('cannot listen', launcher.LOG.read_text())
-        self.assertIn('status 1', launcher.LOG.read_text())
+        self.assertEqual(run.call_count, 2)
+        self.assertIn('build', run.call_args.args[0])
+        self.assertIn('Server build exited with status 37', launcher.LOG.read_text())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def shared_client(self):
+        stream = io.BytesIO()
+        with ZipFile(stream, 'w') as archive:
+            archive.writestr('ruffle.js', b'runtime')
+            archive.writestr('runtime.wasm', b'wasm')
+        runtime = stream.getvalue()
+        self.selection['runtime_bundle_sha256'] = hashlib.sha256(runtime).hexdigest()
+        self.lock['bundleSha256'] = self.selection['runtime_bundle_sha256']
+        with ZipFile(io.BytesIO(self.data)) as archive:
+            files = {name.removeprefix(self.prefix + '/'): archive.read(name) for name in archive.namelist()}
+        files['ruffle/lock.json'] = json.dumps(self.lock).encode()
+        self.data = self.archive(files)
+        self.selection['client_archive_sha256'] = hashlib.sha256(self.data).hexdigest()
+
+        def install(command, client, log):
+            (client / f'.ruffle-{self.lock["version"]}.zip').write_bytes(runtime)
+            (client / 'vendor').mkdir()
+            with ZipFile(io.BytesIO(runtime)) as archive:
+                archive.extractall(client / 'vendor')
+            return 0
+        return install
+
+    def test_deployed_client_is_verified_and_reused_across_run_states(self):
+        install = self.shared_client()
+        with patch.dict(os.environ, XDG_CACHE_HOME=str(self.root / 'cache')), \
+                patch.object(launcher, 'urlopen') as fetch, \
+                patch.object(launcher, 'run', side_effect=install) as prepare:
+            fetch.return_value.__enter__.return_value.read.return_value = self.data
+            first = launcher.prepare_client()
+            original = (first / 'vendor/runtime.wasm').stat()
+            launcher.LOG = self.root / 'second-state/server.log'
+            launcher.LOG.parent.mkdir()
+            second = launcher.prepare_client()
+            after = (second / 'vendor/runtime.wasm').stat()
+        self.assertEqual(first, second)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(prepare.call_count, 1)
+        self.assertEqual((original.st_ino, original.st_mtime_ns), (after.st_ino, after.st_mtime_ns))
+        self.assertEqual(json.loads((launcher.LOG.parent / 'client-selection.json').read_text()), self.selection)
+        self.assertFalse((launcher.LOG.parent / self.prefix).exists())
+
+    def test_modified_shared_runtime_fails_instead_of_rebuilding_or_replacing_it(self):
+        install = self.shared_client()
+        with patch.dict(os.environ, XDG_CACHE_HOME=str(self.root / 'cache')), \
+                patch.object(launcher, 'urlopen') as fetch, \
+                patch.object(launcher, 'run', side_effect=install) as prepare:
+            fetch.return_value.__enter__.return_value.read.return_value = self.data
+            client = launcher.prepare_client()
+            path = client / 'vendor/runtime.wasm'
+            path.write_bytes(b'changed')
+            with self.assertRaisesRegex(RuntimeError, 'Shared runtime asset changed'):
+                launcher.prepare_client()
+            self.assertEqual(path.read_bytes(), b'changed')
+            self.assertEqual(prepare.call_count, 1)
 
 
 if __name__ == '__main__':

@@ -1,36 +1,15 @@
-# Four testing recipes
+# Native scenarios
 
-Copy and adapt these into scratch work. They are examples, not a scenario framework; adding shared helpers or more examples requires explicit approval. Prepared state never proves earned progression. Keep formatting, focused tests and long native journeys separate.
-
-- **Cover:** `cargo test --locked example_cover` constructs a hostile shot behind cover using real collision code.
-- **Timing:** `cargo test --locked example_timing` sends SHOOT before MOVE. For sustained-fire and skipped-clock variants, see the existing native attack regressions.
-- **Prepared state:** default to a new owned `./run.sh PORT --test-state NEW_DIRECTORY --no-shore-bots --client CLIENT_DIRECTORY` session. It starts paused; `node scripts/game.mjs --help` documents authenticated explicit spawning, readable observations, bounded actions, actual gameplay-bot goals and coordinated native pause. Every spawn specifies class, level, seed, all equipment/backpack slots, world, coordinates and controller; no hidden gear or immunity. Keep earned journeys separate. The older offline Store recipe remains available: capture your disposable browser's guest GUID and run `ROTMG_QA_GUID=… cargo test --locked example_prepared_state -- --ignored --nocapture`; LOAD its explicitly prepared level-eight Wizard using the printed new state directory. Never use a production identity/profile.
-- **UI transition:** import `exampleNexusReturn` from `ui-transition.mjs`; pass your owned tab's CDP call function, its server log path and character ID. Start outside Nexus after the game HUD has rendered. The recipe uses page-local focus emulation and releases it afterward; it never activates a desktop window. It sends the selected client's Insert binding and requires a NEW same-character Nexus entry. Key-release failure cannot hide the original error. This demonstrates observation, not the boss portal's UI selection.
-
-On KDE/Wayland, start a private GPU-backed virtual compositor in its own session bus; never attach it to host KWin. Use a fresh absolute `QA_DISPLAY` directory and distinct port/profile:
+Set `PI_BROWSER_TOOLS` to the absolute managed-browser helper directory and `PI_NATIVE_TEST_CHROME` to the absolute Chrome executable. Linux needs Node 22.15+, Xvfb, xauth, Openbox and the normal user session bus. `PI_NATIVE_TEST_CHROME_ARGS` optionally supplies a JSON array of rendering arguments.
 
 ```sh
-mkdir -m 700 "$QA_DISPLAY" "$QA_DISPLAY/config" "$QA_DISPLAY/data"
-env -u DISPLAY -u WAYLAND_DISPLAY XDG_RUNTIME_DIR="$QA_DISPLAY" \
-  XDG_CONFIG_HOME="$QA_DISPLAY/config" XDG_DATA_HOME="$QA_DISPLAY/data" \
-  QT_QPA_PLATFORM=offscreen dbus-run-session -- kwin_wayland --virtual \
-  --socket rotmg-qa --width 1400 --height 1000 --no-global-shortcuts \
-  --no-kactivities --no-lockscreen
+python3 scripts/qa.py native examples/testing/item-use.mjs
 ```
 
-In another terminal, retain the normal user bus/runtime for the managed launcher and Chrome's keyring, but point Chrome exclusively at that private display:
+Copy the small item-use case (`fixture` and `run(game)`), not setup code. The runner allocates durable results outside Git and owns a private display/browser, fresh guest, bounded actions, captures and scratch cleanup. State, profiles and logs remain in the printed results directory. Long jobs use `python3 scripts/qa.py --background native …`; inspect or cancel with `status JOB_DIRECTORY` / `cancel JOB_DIRECTORY`. Linux requires a user systemd manager (250+) and cgroup v2.
 
-```sh
-env -u DISPLAY WAYLAND_DISPLAY="$QA_DISPLAY/rotmg-qa" node --input-type=module - <<'JS'
-import {launchBrowser} from '/home/wacket/.local/share/pi-browser-tools/launch-browser.mjs';
-console.log(await launchBrowser({owner:process.env.PI_BROWSER_OWNER,args:[
-  `--remote-debugging-port=${process.env.CHROME_PORT}`,
-  `--user-data-dir=${process.env.CHROME_PROFILE}`, '--ozone-platform=wayland',
-  '--window-size=1280,960', '--no-first-run', '--no-default-browser-check', 'about:blank',
-]}));
-JS
-```
+Prepared fixtures do not prove earned progression; keep normal journeys separate. Never use host input, `Page.bringToFront` or target activation; use page-local focus only.
 
-Export the port/profile variables; jobs outside Pi must supply an explicit `PI_BROWSER_OWNER`. Use managed target creation/activity helpers. Close owned targets/Chrome before stopping the owned compositor; preserve profiles. Do not use host `Page.bringToFront`, `Target.activateTarget` or MCP `bringToFront:true`. Focus emulation alone does not guarantee render cadence: verify actual frames and native outcomes, without host activation as repair. Xvfb alone failed native rendering here (WebGL blocklisting/AVM2 errors); do not silently substitute it or relax GPU/security flags.
+The protected `persona` starting-context operation takes an actual catalog `profile`, `world` and walkable `position`, requires a paused fresh test registration, and uses ordinary persona provisioning/replacement. Existing `game_bot` spawns remain pinned and stop on death. Privileged `world_info.damaging_ground` exposes up to 16 real walkable hazard positions; it does not create damage or death.
 
-Rust recipes compile with the existing tests; the prepared-state recipe runs only when explicitly selected. No browser dependency is bundled: use your existing browser-scoped connection, never desktop input. Keep generated state, media and exploratory scripts outside Git.
+`result.json` records timings and assertions; `case.mjs` retains the scenario source. Failures exit nonzero and retain state/logs. Discover controller operations and limits with `node scripts/game.mjs --help`.

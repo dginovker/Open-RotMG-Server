@@ -44,6 +44,16 @@ enum Deployment {
     Bomb,
 }
 impl World {
+    // Client getTimer cooldowns continue during skipped physics ticks: https://github.com/moistosaurus/realm-cli/blob/a13c855dc5e09ee301fd0a66fcd303cfb5dff74e/src/com/company/assembleegameclient/objects/Player.as#L899-L917
+    pub(super) fn ability_clock_ms(&self) -> Result<u64> {
+        Ok(self
+            .clock
+            .now()
+            .checked_duration_since(self.attack_epoch)
+            .context("ability clock regressed")?
+            .as_millis() as u64)
+    }
+
     pub(super) fn spend_ability(
         &mut self,
         id: i32,
@@ -51,39 +61,43 @@ impl World {
         item: &Object,
         pos: Pos,
     ) -> Result<()> {
+        let now = self.ability_clock_ms()?;
         let p = &self.players[&id];
+        ensure!(
+            p.persistence_failure.is_none(),
+            "ability caster is unavailable"
+        );
         ensure!(
             p.character.alive
                 && !p.death_pending
                 && !p.departing
-                && !p.pending
+                && (!p.pending || p.progress_started)
                 && !p.paused
                 && p.persistence_failure.is_none(),
-            "ability caster is unavailable"
+            controller("ability caster is unavailable")
         );
         ensure!(
             slot.object == id && slot.kind == item.kind as i32 && p.character.items[1] == slot.kind,
-            "ability item does not match equipped item"
+            controller("ability item does not match equipped item")
         );
         ensure!(
             slot.slot == 1 && item.slot_type == self.content.get(p.character.class)?.slots[1],
-            "ability must be equipped by a compatible class"
+            controller("ability must be equipped by a compatible class")
         );
         ensure!(
             p.tx.as_ref()
-                .is_none_or(|tx| !*tx.lost.borrow() && !tx.packets.is_closed()),
-            "ability connection is closed"
+                .is_none_or(|tx| !tx.lost.borrow().is_some() && !tx.packets.is_closed()),
+            controller("ability connection is closed")
         );
         ensure!(
             p.conditions(self.now) & crate::condition::bit(crate::condition::QUIET) == 0,
-            "cannot cast while Quiet"
+            controller("cannot cast while Quiet")
         );
-        ensure!(p.character.mp >= item.mana_cost, "not enough mana");
         ensure!(
-            p.last_ability
-                .is_none_or(|last| self.now >= last + item.cooldown_ms),
-            "ability cooldown"
+            p.character.mp >= item.mana_cost,
+            controller("not enough mana")
         );
+        ensure!(now >= p.ability_ready_ms, controller("ability cooldown"));
         let reach = item
             .abilities
             .iter()
@@ -100,15 +114,22 @@ impl World {
                 && pos.y.is_finite()
                 && p.pos.distance(pos) <= reach
                 && self.map.cell(pos.x, pos.y).is_some(),
-            "invalid ability target or target too far"
+            controller("invalid ability target or target too far")
         );
+        let ability_ready_ms = now
+            .checked_add(item.cooldown_ms)
+            .context("ability cooldown overflow")?;
         let p = self.players.get_mut(&id).unwrap();
         p.character.mp -= item.mana_cost;
-        p.last_ability = Some(self.now);
+        p.character.lifetime.ability_used = true;
+        p.ability_ready_ms = ability_ready_ms;
         tracing::info!(
             player = id,
             item = item.kind,
             mana_cost = item.mana_cost,
+            cooldown_ms = item.cooldown_ms,
+            ability_clock_ms = now,
+            simulation_time_ms = self.now,
             "ability activated"
         );
         Ok(())
@@ -132,13 +153,24 @@ impl World {
             .collect()
     }
     fn ability_enemies(&self, pos: Pos, radius: f32) -> Vec<i32> {
-        self.entities
-            .values()
+        let mut ids: Vec<_> = self
+            .near_entities(
+                Pos {
+                    x: pos.x - radius,
+                    y: pos.y - radius,
+                },
+                Pos {
+                    x: pos.x + radius,
+                    y: pos.y + radius,
+                },
+            )
             .filter(|e| {
                 e.hp > 0 && self.content.objects[&e.kind].enemy && e.pos.distance(pos) <= radius
             })
             .map(|e| e.id)
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     }
     fn ability_effect(&self, kind: u8, owner: i32, a: Pos, b: Pos, color: u32) {
         let mut out = Writer::new();
@@ -170,16 +202,12 @@ impl World {
                 + self.ability_state.objects.len()
                 + item.abilities.len()
                 <= MAX_ACTIVE,
-            "active ability budget exhausted"
+            controller("active ability budget exhausted")
         );
         let origin = self.players[&id].pos;
         for effect in &item.abilities {
             match effect {
                 Ability::Shoot => {
-                    ensure!(
-                        self.players[&id].controller == Controller::Human,
-                        "projectile abilities require native reports"
-                    );
                     ensure!(
                         (1..=5).contains(&item.shots)
                             && item.activations == 1
@@ -196,11 +224,11 @@ impl World {
                 Ability::Teleport { distance } => {
                     ensure!(
                         origin.distance(pos) <= *distance && self.walkable(pos),
-                        "teleport target is blocked or outside ability range"
+                        controller("teleport target is blocked or outside ability range")
                     );
                 }
                 Ability::Trap { .. } => {
-                    ensure!(self.walkable(pos), "trap target is blocked");
+                    ensure!(self.walkable(pos), controller("trap target is blocked"));
                     self.content.get(0x711)?;
                 }
                 Ability::Decoy { .. } => {
@@ -234,6 +262,10 @@ impl World {
                 "ability activation applied"
             );
             match *effect {
+                // Native clients report their own ability projectiles; other controllers have no client.
+                Ability::Shoot if self.players[&id].controller != Controller::Human => {
+                    self.ability_shots(id, item, origin, pos)?
+                }
                 Ability::Shoot => {}
                 Ability::Nova => self.ability_nova(id, item, pos)?,
                 Ability::Heal { amount, range } => self.heal_ability(id, item, amount, range)?,
@@ -414,6 +446,30 @@ impl World {
         }
         Ok(())
     }
+    fn ability_shots(&mut self, id: i32, item: &Object, origin: Pos, target: Pos) -> Result<()> {
+        let time = self.now as i32;
+        let aim = (target.y - origin.y).atan2(target.x - origin.x);
+        // Like the client, every pellet leaves the central muzzle at its own spread angle.
+        let start = Pos {
+            x: origin.x + 0.3 * aim.cos(),
+            y: origin.y + 0.3 * aim.sin(),
+        };
+        let p = self.players.get_mut(&id).unwrap();
+        p.ability_shot = Some((item.kind, time, true, 0));
+        let first = p.next_bullet;
+        for i in 0..item.shots {
+            let spread = item.arc.to_radians() * (i as f32 - (item.shots - 1) as f32 / 2.);
+            self.shoot(
+                id,
+                time,
+                (first + i as u8) % 128,
+                item.kind,
+                start,
+                aim + spread,
+            )?;
+        }
+        Ok(())
+    }
     fn ability_lightning(
         &mut self,
         owner: i32,
@@ -435,8 +491,9 @@ impl World {
                     == 0
         };
         let first = self
-            .entities
-            .values()
+            .ability_enemies(origin, 14.)
+            .into_iter()
+            .map(|id| &self.entities[&id])
             .filter(eligible)
             .filter(|e| {
                 origin.distance(e.pos) <= 14.
@@ -454,8 +511,9 @@ impl World {
             while chain.len() < maximum {
                 let from = self.entities[chain.last().unwrap()].pos;
                 let next = self
-                    .entities
-                    .values()
+                    .ability_enemies(from, 10.)
+                    .into_iter()
+                    .map(|id| &self.entities[&id])
                     .filter(eligible)
                     .filter(|e| !chain.contains(&e.id) && from.distance(e.pos) <= 10.)
                     .min_by(|a, b| from.distance(a.pos).total_cmp(&from.distance(b.pos)))
@@ -511,6 +569,12 @@ impl World {
             .clone();
         let p = self.players.get_mut(&id).unwrap();
         p.character.shots += 20;
+        p.character.lifetime.shots = p
+            .character
+            .lifetime
+            .shots
+            .checked_add(20)
+            .context("lifetime ability shots overflow")?;
         let mut messages = Vec::new();
         for i in 0..20 {
             let bullet = p.server_bullet;
@@ -529,6 +593,7 @@ impl World {
                 damage,
                 spec: spec.clone(),
                 hit: BTreeSet::new(),
+                hit_enemy: false,
             });
             let mut out = Writer::new();
             out.u8(bullet)
@@ -543,7 +608,8 @@ impl World {
         for body in messages {
             for (peer, p) in &mut self.players {
                 if p.known.contains(&id)
-                    && (*peer != id || native_hits::expect_shoot_ack(p, vec![]))
+                    && (*peer == id || p.pos.distance(pos) <= 20.)
+                    && (*peer != id || native_hits::expect_shoot_ack(p, vec![], &self.clock))
                 {
                     send(p, 13, body.clone());
                 }
@@ -750,14 +816,33 @@ impl World {
                         continue;
                     }
                     if self.now < moving_until {
-                        let goal = Pos {
-                            x: pos.x + angle.cos() * speed * 0.05,
-                            y: pos.y + angle.sin() * speed * 0.05,
+                        assert!(
+                            angle.is_finite() && speed.is_finite() && speed >= 0.,
+                            "invalid decoy trajectory for {id}: angle={angle}, speed={speed}"
+                        );
+                        let distance = speed * 0.05;
+                        let delta = Pos {
+                            x: angle.cos() * distance,
+                            y: angle.sin() * distance,
                         };
-                        if self.walkable(goal) {
-                            self.move_entity(id, goal, speed * 0.05)
-                                .expect("validated decoy movement");
-                        }
+                        let samples = (distance / 0.1).ceil().max(1.) as usize;
+                        // Legal endpoints can straddle a blocked corner; wall contact stops this step.
+                        let blocked = (1..=samples).any(|i| {
+                            !self.walkable(Pos {
+                                x: pos.x + delta.x / samples as f32 * i as f32,
+                                y: pos.y + delta.y / samples as f32 * i as f32,
+                            })
+                        });
+                        let resolved = if blocked {
+                            pos
+                        } else {
+                            Pos {
+                                x: pos.x + delta.x,
+                                y: pos.y + delta.y,
+                            }
+                        };
+                        self.position_entity(id, resolved)
+                            .expect("validated decoy movement");
                     }
                 }
                 Deployment::Bomb => {
@@ -774,5 +859,264 @@ impl World {
             }
             self.ability_state.objects.insert(id, object);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decoy_world(origin: Pos, angle: f32, blocked: Option<(usize, usize)>) -> (World, i32, i32) {
+        let content = Arc::new(Content::load(std::path::Path::new("data")).unwrap());
+        let mut map = Map {
+            width: 32,
+            height: 32,
+            cells: vec![
+                crate::content::Cell {
+                    ground: 0x46,
+                    object: None,
+                    config: String::new(),
+                    terrain: 0,
+                    region: 0,
+                };
+                32 * 32
+            ],
+            spawns: vec![(origin.x, origin.y)],
+        };
+        if let Some((x, y)) = blocked {
+            map.cells[y * 32 + x].ground = 255;
+        }
+        let mut world = World::new(content, Arc::new(map)).unwrap();
+        let character: Character = serde_json::from_value(serde_json::json!({
+            "schema":1,"lifetime":crate::store::FameLifetime::complete(),
+            "class":0x324,"base":[720,252,50,25,75,75,40,50],
+            "id":1,"account":1,"name":"Decoy","level":20,"exp":0,
+            "fame":0,"hp":720,"mp":252,"revision":0,"alive":true,
+            "items":[-1,0xae3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1]
+        }))
+        .unwrap();
+        let owner = world.enter(character, None).unwrap();
+        world.players.get_mut(&owner).unwrap().last_motion = Some((angle, world.now));
+        world
+            .use_item(
+                owner,
+                Slot {
+                    object: owner,
+                    slot: 1,
+                    kind: 0xae3,
+                },
+                origin,
+            )
+            .unwrap();
+        assert_eq!(world.players[&owner].character.mp, 192);
+        let decoy = *world.ability_state.objects.keys().next().unwrap();
+        assert_eq!(world.ability_state.objects[&decoy].owner, owner);
+        (world, owner, decoy)
+    }
+
+    #[test]
+    fn decoy_tick_stops_before_blocked_intermediate_tile_with_walkable_endpoint() {
+        let origin = Pos { x: 4.9, y: 4.7 };
+        let angle = std::f32::consts::FRAC_PI_4;
+        let (mut world, owner, decoy) = decoy_world(origin, angle, Some((5, 4)));
+        let distance = world.players[&owner]
+            .speed(&world.content, world.now)
+            .unwrap()
+            * 50.;
+        let goal = Pos {
+            x: origin.x + angle.cos() * distance,
+            y: origin.y + angle.sin() * distance,
+        };
+        assert!(world.walkable(origin) && world.walkable(goal));
+        assert!(!world.walkable(Pos { x: 5.03, y: 4.83 }));
+        world.step();
+        let stopped = world.entities[&decoy].pos;
+        assert!(world.walkable(stopped));
+        assert!(stopped.x < 5. && stopped.y < 5.);
+        for _ in 0..28 {
+            world.step();
+        }
+        assert!(world.entities[&decoy].pos.distance(stopped) < 1e-6);
+        assert_eq!(world.ability_state.objects[&decoy].owner, owner);
+    }
+
+    #[test]
+    fn decoy_tick_stops_at_blocking_object_corner() {
+        let origin = Pos { x: 4.9, y: 4.7 };
+        let (mut world, _, decoy) = decoy_world(origin, std::f32::consts::FRAC_PI_4, None);
+        world
+            .spawn_entity(0xde5, Pos { x: 5.5, y: 4.5 }, vec![])
+            .unwrap();
+        assert!(!world.walkable(Pos { x: 5.03, y: 4.83 }));
+        world.step();
+        assert!(world.entities[&decoy].pos.distance(origin) < 1e-6);
+    }
+
+    #[test]
+    fn decoy_tick_stops_at_blocked_endpoint_and_world_edge() {
+        for (origin, blocked) in [
+            (Pos { x: 4.9, y: 4.5 }, Some((5, 4))),
+            (Pos { x: 31.9, y: 4.5 }, None),
+        ] {
+            let (mut world, _, decoy) = decoy_world(origin, 0., blocked);
+            world.step();
+            assert!(world.entities[&decoy].pos.distance(origin) < 1e-6);
+            for _ in 0..59 {
+                world.step();
+            }
+            assert!(!world.entities.contains_key(&decoy));
+            assert!(!world.ability_state.objects.contains_key(&decoy));
+        }
+    }
+
+    #[test]
+    fn decoy_tick_open_motion_stops_at_half_duration_then_expires() {
+        let origin = Pos { x: 4.9, y: 4.5 };
+        let (mut world, owner, decoy) = decoy_world(origin, 0., None);
+        let character = world.players[&owner].character.clone();
+        world.step();
+        assert!((world.entities[&decoy].pos.x - origin.x - 0.48).abs() < 1e-5);
+        for _ in 0..28 {
+            world.step();
+        }
+        let stopped = world.entities[&decoy].pos;
+        for _ in 0..30 {
+            world.step();
+        }
+        assert!(world.entities[&decoy].pos.distance(stopped) < 1e-6);
+        assert_eq!(world.players[&owner].character.items, character.items);
+        assert_eq!(world.players[&owner].character.revision, character.revision);
+        assert_eq!(world.ability_state.objects[&decoy].owner, owner);
+        world.step();
+        assert!(!world.entities.contains_key(&decoy));
+        assert!(world.ability_state.objects.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid decoy trajectory")]
+    fn decoy_tick_rejects_nonfinite_trajectory() {
+        let (mut world, _, decoy) = decoy_world(Pos { x: 4.5, y: 4.5 }, 0., None);
+        let Deployment::Decoy { speed, .. } =
+            &mut world.ability_state.objects.get_mut(&decoy).unwrap().kind
+        else {
+            unreachable!();
+        };
+        *speed = f32::NAN;
+        world.step();
+    }
+
+    #[test]
+    fn decoy_tick_removes_departing_owners_deployment() {
+        let (mut world, owner, decoy) = decoy_world(Pos { x: 4.5, y: 4.5 }, 0., None);
+        world.players.get_mut(&owner).unwrap().departing = true;
+        world.step();
+        assert!(!world.entities.contains_key(&decoy));
+        assert!(world.ability_state.objects.is_empty());
+    }
+
+    #[test]
+    fn ability_cooldown_uses_elapsed_unpaused_time_not_world_steps() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let content = Arc::new(Content::load(&data).unwrap());
+        let map = Arc::new(Map::load(&data.join("tutorial.wmap"), &content).unwrap());
+        let mut world = World::new(content, map).unwrap();
+        let character: Character = serde_json::from_value(serde_json::json!({
+            "schema":1,"lifetime":crate::store::FameLifetime::complete(),
+            "class":0x30e,"base":[670,385,75,25,50,75,40,60],
+            "id":1,"account":1,"name":"Cooldown","level":20,"exp":0,
+            "fame":0,"hp":670,"mp":385,"revision":0,"alive":true,
+            "items":[-1,0xa2e,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1]
+        }))
+        .unwrap();
+        let id = world.enter(character, None).unwrap();
+        let pos = world.players[&id].pos;
+        let item = world.content.get(0xa2e).unwrap().clone();
+        assert_eq!(item.cooldown_ms, 500);
+        let slot = Slot {
+            object: id,
+            slot: 1,
+            kind: 0xa2e,
+        };
+        world.spend_ability(id, slot, &item, pos).unwrap();
+        let mp = world.players[&id].character.mp;
+        assert!(
+            world
+                .spend_ability(id, slot, &item, pos)
+                .unwrap_err()
+                .to_string()
+                .contains("ability cooldown")
+        );
+        assert_eq!(world.players[&id].character.mp, mp);
+        world.clock.set_paused(true);
+        std::thread::sleep(Duration::from_millis(550));
+        assert!(world.spend_ability(id, slot, &item, pos).is_err());
+        world.clock.set_paused(false);
+        assert!(world.spend_ability(id, slot, &item, pos).is_err());
+        std::thread::sleep(Duration::from_millis(550));
+        assert_eq!(world.now, 0);
+        world
+            .spend_ability(id, slot, &item, pos)
+            .expect("real cooldown elapsed despite no simulation ticks");
+        assert_eq!(world.players[&id].character.mp, mp - item.mana_cost);
+        assert!(world.spend_ability(id, slot, &item, pos).is_err());
+    }
+
+    #[test]
+    fn autonomous_shoot_ability_fans_from_one_muzzle_under_native_condition_rules() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let content = Arc::new(Content::load(&data).unwrap());
+        let map = Arc::new(Map::load(&data.join("tutorial.wmap"), &content).unwrap());
+        let mut world = World::new(content, map).unwrap();
+        let character: Character = serde_json::from_value(serde_json::json!({
+            "schema":1,"lifetime":crate::store::FameLifetime::complete(),
+            "class":0x31e,"base":[770,252,50,40,50,50,75,50],
+            "id":1,"account":1,"name":"Shield","level":20,"exp":0,
+            "fame":0,"hp":770,"mp":252,"revision":0,"alive":true,
+            "items":[-1,0xa09,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1]
+        }))
+        .unwrap();
+        let id = world.enter(character, None).unwrap();
+        world.players.get_mut(&id).unwrap().controller = Controller::Autonomous;
+        // Native ability shots stay legal while Paralyzed or Stunned; only the weapon is suppressed.
+        for condition in [crate::condition::PARALYZED, crate::condition::STUNNED] {
+            world.apply_condition(id, condition, 5000).unwrap();
+        }
+        let pos = world.players[&id].pos;
+        let shield = world.content.get(0xa09).unwrap().clone();
+        assert_eq!(shield.shots, 2);
+        let slot = Slot {
+            object: id,
+            slot: 1,
+            kind: 0xa09,
+        };
+        let target = Pos {
+            x: pos.x,
+            y: pos.y + 2.,
+        };
+        world.use_item(id, slot, target).unwrap();
+        let central = std::f32::consts::FRAC_PI_2;
+        let half = shield.arc.to_radians() / 2.;
+        let shots: Vec<_> = world.bullets.iter().filter(|b| b.owner == id).collect();
+        assert_eq!(shots.len(), 2);
+        let muzzle = Pos {
+            x: pos.x + 0.3 * central.cos(),
+            y: pos.y + 0.3 * central.sin(),
+        };
+        for (shot, angle) in shots.iter().zip([central - half, central + half]) {
+            assert!(
+                (shot.angle - angle).abs() < 1e-5,
+                "{} != {angle}",
+                shot.angle
+            );
+            assert!(shot.start.distance(muzzle) < 1e-5);
+        }
+        assert_eq!(world.players[&id].character.mp, 252 - shield.mana_cost);
+        assert!(world.players[&id].ability_shot.is_none());
+        std::thread::sleep(Duration::from_millis(shield.cooldown_ms + 50));
+        world
+            .apply_condition(id, crate::condition::QUIET, 1000)
+            .unwrap();
+        assert!(world.use_item(id, slot, target).is_err());
+        assert_eq!(world.bullets.len(), 2);
     }
 }
