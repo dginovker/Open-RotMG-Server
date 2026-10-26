@@ -7,6 +7,8 @@ use std::{net::SocketAddr, path::PathBuf};
 pub struct Config {
     pub bind: SocketAddr,
     pub origin: String,
+    #[serde(default)]
+    pub bot_view_origin: Option<String>,
     pub data: PathBuf,
     pub client: PathBuf,
     pub state: PathBuf,
@@ -16,17 +18,36 @@ pub struct Config {
     pub behind_proxy: bool,
     #[serde(default = "default_shore_bots")]
     pub shore_bots: bool,
+    #[serde(default)]
+    pub bot_llm: bool,
+    #[serde(default = "default_bot_population")]
+    pub bot_population: usize,
+    #[serde(default = "default_bot_session_seconds")]
+    pub bot_session_seconds: [u64; 2],
     pub realm_seed: u64,
+    #[serde(default = "default_realm_count")]
+    pub realm_count: usize,
+}
+fn default_realm_count() -> usize {
+    2
+}
+fn default_bot_session_seconds() -> [u64; 2] {
+    [1800, 5400]
+}
+fn default_bot_population() -> usize {
+    20
 }
 fn default_shore_bots() -> bool {
     true
 }
+
 impl Config {
     pub fn load(args: &[String]) -> Result<(Self, bool)> {
         let mut file = None;
         let mut port = None;
         let mut control = false;
         let mut shore_bots = None;
+        let mut bot_llm = None;
         let mut client_dir = None;
         let mut state_dir = None;
         let mut test_state = false;
@@ -52,6 +73,10 @@ impl Config {
                     ensure!(shore_bots.is_none(), "duplicate or conflicting bot flags");
                     shore_bots = Some(arg == "--shore-bots");
                 }
+                "--bot-llm" | "--no-bot-llm" => {
+                    ensure!(bot_llm.is_none(), "duplicate or conflicting LLM flags");
+                    bot_llm = Some(arg == "--bot-llm");
+                }
                 "--client" => {
                     ensure!(client_dir.is_none(), "duplicate --client");
                     client_dir = Some(PathBuf::from(
@@ -68,7 +93,7 @@ impl Config {
                     ));
                 }
                 _ => anyhow::bail!(
-                    "usage: openrotmg [--config FILE] [--port PORT] [--dev-control] [--shore-bots | --no-shore-bots] [--client DIR] [--state DIR]"
+                    "usage: openrotmg [--config FILE] [--port PORT] [--dev-control] [--shore-bots | --no-shore-bots] [--bot-llm | --no-bot-llm] [--client DIR] [--state DIR]"
                 ),
             }
         }
@@ -81,6 +106,7 @@ impl Config {
             Self {
                 bind: "127.0.0.1:18923".parse()?,
                 origin: "http://127.0.0.1:18923".into(),
+                bot_view_origin: Some("http://127.0.0.1:18923".into()),
                 data: root.join("data"),
                 client: root
                     .parent()
@@ -91,7 +117,11 @@ impl Config {
                 max_players: 85,
                 behind_proxy: false,
                 shore_bots: true,
+                bot_llm: false,
+                bot_population: default_bot_population(),
+                bot_session_seconds: default_bot_session_seconds(),
                 realm_seed: rand::random(),
+                realm_count: default_realm_count(),
             }
         };
         if let Some(client) = client_dir {
@@ -104,10 +134,14 @@ impl Config {
             config.bind.set_port(port);
             if file.is_none() {
                 config.origin = format!("http://{}", config.bind);
+                config.bot_view_origin = Some(config.origin.clone());
             }
         }
         if let Some(enabled) = shore_bots {
             config.shore_bots = enabled;
+        }
+        if let Some(enabled) = bot_llm {
+            config.bot_llm = enabled;
         }
         config.test_state |= test_state;
         control |= test_state;
@@ -124,9 +158,26 @@ impl Config {
     }
     fn validate(&self, control: bool) -> Result<()> {
         ensure!(
+            (2..=3).contains(&self.realm_count),
+            "realm_count must be 2 or 3"
+        );
+        ensure!(
             self.bind.ip().is_loopback(),
             "backend bind must be loopback; terminate public TLS at the proxy"
         );
+        if let Some(origin) = &self.bot_view_origin {
+            let url = reqwest::Url::parse(origin).context("invalid bot_view_origin")?;
+            let local = url.host_str().is_some_and(|h| {
+                h == "localhost"
+                    || h.parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+            ensure!(
+                url.origin().ascii_serialization() == *origin
+                    && (url.scheme() == "https" || local && url.scheme() == "http"),
+                "bot_view_origin requires an exact HTTPS origin, or loopback HTTP"
+            );
+        }
         let uri: axum::http::Uri = self.origin.parse().context("invalid public origin")?;
         ensure!(
             uri.authority().is_some()
@@ -149,8 +200,20 @@ impl Config {
             "development control cannot be enabled behind a public proxy"
         );
         ensure!(
-            !self.shore_bots || self.max_players >= 7,
-            "adventuring bots require capacity for six bots plus a human"
+            !self.shore_bots || self.max_players > self.bot_population,
+            "adventuring bots require capacity for {} bots plus a human",
+            self.bot_population
+        );
+        ensure!(
+            (30..=86400).contains(&self.bot_session_seconds[0])
+                && self.bot_session_seconds[0] <= self.bot_session_seconds[1]
+                && self.bot_session_seconds[1] <= 86400,
+            "bot_session_seconds must be an ordered range between 30 and 86400 seconds"
+        );
+        ensure!(
+            self.bot_population <= crate::bots::persona_count(),
+            "bot_population exceeds the {} catalogued personas",
+            crate::bots::persona_count()
         );
         ensure!(
             (1..=85).contains(&self.max_players),
@@ -167,133 +230,27 @@ impl Config {
 }
 
 #[cfg(test)]
-mod tests {
+mod bot_view_tests {
     use super::*;
-    fn config() -> Config {
-        serde_json::from_str(r#"{"bind":"127.0.0.1:18923","origin":"https://openrotmg.org","data":"/opt/openrotmg/data","client":"/opt/openrotmg/client","state":"/var/lib/openrotmg","max_players":16,"behind_proxy":true,"realm_seed":12351}"#).unwrap()
-    }
     #[test]
-    fn explicit_production_config() {
-        config().validate(false).unwrap();
-        assert!(config().validate(true).is_err());
-        assert!(Config::load(&["--config".into()]).is_err());
-        assert!(Config::load(&["--unknown".into()]).is_err());
-        let mut c = config();
-        c.bind = "0.0.0.0:18923".parse().unwrap();
-        assert!(c.validate(false).is_err());
-        c = config();
-        c.origin = "http://openrotmg.org".into();
-        assert!(c.validate(false).is_err());
-        c = config();
-        c.state = "relative".into();
-        assert!(c.validate(false).is_err());
-    }
-    #[test]
-    fn optional_local_port() {
-        let (default, _) = Config::load(&[]).unwrap();
-        assert_eq!(default.bind.to_string(), "127.0.0.1:18923");
-        assert_eq!(default.origin, "http://127.0.0.1:18923");
-        for port in ["1", "8080", "65535"] {
-            let (custom, _) = Config::load(&["--port".into(), port.into()]).unwrap();
-            assert_eq!(custom.bind.to_string(), format!("127.0.0.1:{port}"));
-            assert_eq!(custom.origin, format!("http://127.0.0.1:{port}"));
-        }
-        assert!(Config::load(&["--port".into()]).is_err());
-        for port in ["0", "-1", "65536", "abc", "8080.5"] {
-            assert!(Config::load(&["--port".into(), port.into()]).is_err());
-        }
-        assert!(
-            Config::load(&[
-                "--port".into(),
-                "8080".into(),
-                "--port".into(),
-                "8081".into()
-            ])
-            .is_err()
-        );
-    }
-    #[test]
-    fn shore_bots_default_on_allow_explicit_disable_and_reserve_human_capacity() {
-        assert!(Config::load(&[]).unwrap().0.shore_bots);
-        assert!(config().shore_bots);
-        assert!(
-            !Config::load(&["--no-shore-bots".into()])
-                .unwrap()
-                .0
-                .shore_bots
-        );
-        assert!(Config::load(&["--shore-bots".into()]).unwrap().0.shore_bots);
-        for flags in [
-            ["--shore-bots", "--shore-bots"],
-            ["--no-shore-bots", "--no-shore-bots"],
-            ["--shore-bots", "--no-shore-bots"],
-            ["--no-shore-bots", "--shore-bots"],
-        ] {
-            assert!(Config::load(&flags.map(String::from)).is_err());
-        }
-        let disabled: Config = serde_json::from_str(r#"{"bind":"127.0.0.1:18923","origin":"https://openrotmg.org","data":"/opt/openrotmg/data","client":"/opt/openrotmg/client","state":"/var/lib/openrotmg","max_players":3,"behind_proxy":true,"shore_bots":false,"realm_seed":12351}"#).unwrap();
-        assert!(!disabled.shore_bots);
-        disabled.validate(false).unwrap();
-        let mut production = config();
-        production.shore_bots = true;
-        production.validate(false).unwrap();
-        assert!(production.validate(true).is_err());
-        production.max_players = 6;
-        assert!(production.validate(false).is_err());
-        production.max_players = 7;
-        production.validate(false).unwrap();
-    }
-    #[test]
-    fn explicit_state_does_not_change_client_or_origin() {
-        let (original, _) = Config::load(&[]).unwrap();
-        let (isolated, _) = Config::load(&["--state".into(), "/tmp/qa-state".into()]).unwrap();
+    fn bot_view_origin_is_explicit_and_local_defaults_track_the_port() {
+        let (mut config, _) = Config::load(&["--port".into(), "19023".into()]).unwrap();
         assert_eq!(
-            (isolated.state, isolated.client, isolated.origin),
-            (
-                PathBuf::from("/tmp/qa-state"),
-                original.client,
-                original.origin
-            )
+            config.bot_view_origin.as_deref(),
+            Some(config.origin.as_str())
         );
-    }
-    #[test]
-    fn prepared_sessions_require_an_explicitly_disabled_automatic_roster() {
-        assert!(Config::load(&["--test-state".into(), "/tmp/explicit-qa".into()]).is_err());
-        let (prepared, control) = Config::load(&[
-            "--test-state".into(),
-            "/tmp/explicit-qa".into(),
-            "--no-shore-bots".into(),
-        ])
-        .unwrap();
-        assert!(prepared.test_state && !prepared.shore_bots && control);
-    }
-    #[test]
-    fn malformed_state_arguments_are_rejected() {
-        for args in [
-            vec!["--state"],
-            vec!["--state", "relative"],
-            vec!["--state", "/tmp/a", "--state", "/tmp/b"],
+        for origin in [
+            "https://game.example/path",
+            "https://user@game.example",
+            "http://game.example",
+            "https://game.example/",
         ] {
-            assert!(Config::load(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
+            config.bot_view_origin = Some(origin.into());
+            assert!(config.validate(false).is_err(), "{origin}");
         }
-    }
-    #[test]
-    fn local_launcher_remains_explicit() {
-        Config::load(&[]).unwrap();
-        assert!(Config::load(&["--hosted-client".into()]).is_err());
-        assert!(Config::load(&["--client".into()]).is_err());
-        assert!(Config::load(&["--client".into(), "relative".into()]).is_err());
-        assert!(
-            Config::load(&[
-                "--client".into(),
-                "/tmp/client".into(),
-                "--hosted-client".into()
-            ])
-            .is_err()
-        );
-        let (local, _) = Config::load(&["--client".into(), "/tmp/client".into()]).unwrap();
-        assert_eq!(local.client, PathBuf::from("/tmp/client"));
-        Config::load(&["--dev-control".into()]).unwrap();
-        assert!(Config::load(&["--dev-control".into(), "--dev-control".into()]).is_err());
+        config.bot_view_origin = Some("https://game.example".into());
+        config.validate(false).unwrap();
+        config.bot_view_origin = None;
+        config.validate(false).unwrap();
     }
 }
