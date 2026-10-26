@@ -112,9 +112,14 @@ pub(super) async fn discord_link(
         return response;
     }
     json_result(
-        a.store
-            .redeem_discord_code(request.code, request.discord_id)
-            .await
-            .map(|name| serde_json::json!({"name":name})),
+        async {
+            let (account, name) = a
+                .store
+                .redeem_discord_code(request.code, request.discord_id)
+                .await?;
+            super::gold::sync(&a, account).await?;
+            Ok(serde_json::json!({"name":name}))
+        }
+        .await,
     )
 }

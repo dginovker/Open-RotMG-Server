@@ -1,6 +1,5 @@
 use super::*;
-#[cfg(test)]
-mod tests;
+
 use crate::store::Character;
 use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
@@ -14,6 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+mod guild_tests;
+#[cfg(test)]
+mod persona_tests;
+#[cfg(test)]
+mod protection_tests;
+
 const MAX_REQUEST_BYTES: usize = 8192;
 const MAX_MUTATIONS: usize = 1024;
 
@@ -22,6 +28,25 @@ struct NativeLease {
     owner: String,
     expires: Instant,
     actors: Vec<i32>,
+}
+struct NativeControlRequest {
+    trace: Arc<crate::performance::NativeControlTrace>,
+    requests: Arc<Mutex<crate::performance::Requests>>,
+    outcome: &'static str,
+    error: Option<String>,
+}
+impl Drop for NativeControlRequest {
+    fn drop(&mut self) {
+        let message = if self.outcome == "dropped" {
+            "native control request dropped"
+        } else {
+            "native control request completed"
+        };
+        tracing::info!(request=%self.trace.request,operation=%self.trace.operation,outcome=self.outcome,
+            elapsed_ms=self.trace.started.elapsed().as_secs_f64()*1000.,
+            world_requests=%self.requests.lock().expect("request timings poisoned").snapshot(),
+            error=?self.error,"{message}");
+    }
 }
 
 #[derive(Clone)]
@@ -50,6 +75,13 @@ pub struct Spawn {
     pub profile: Option<String>,
     pub stats: Option<[i32; 8]>,
 }
+// Normal personas have no fabricated equipment/class spawn specification.
+#[derive(Serialize, Deserialize)]
+struct Registration {
+    guid: String,
+    controller: Controller,
+    profile: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Controller {
@@ -67,6 +99,9 @@ pub struct Request {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Capabilities,
+    PrepareRealmCapacity {
+        limit: usize,
+    },
     Catalog {
         search: String,
         limit: usize,
@@ -77,8 +112,15 @@ enum Command {
     Spawn {
         spec: Spawn,
     },
+    Persona {
+        profile: String,
+        world: i32,
+        position: Pos,
+    },
     World {
         template: String,
+        #[serde(default)]
+        seed: Option<u64>,
     },
     Observe {
         actor: i32,
@@ -148,9 +190,43 @@ enum Goal {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Cheat {
-    Stats { values: [i32; 8] },
-    Item { slot: usize, item: i32 },
-    Teleport { position: Pos },
+    Vitals {
+        hp: i32,
+        mp: i32,
+    },
+    Stats {
+        values: [i32; 8],
+    },
+    Item {
+        slot: usize,
+        item: i32,
+    },
+    Teleport {
+        position: Pos,
+    },
+    StatModifier {
+        index: usize,
+        amount: i32,
+        duration_ms: u64,
+    },
+    Guild {
+        name: String,
+        members: Vec<i32>,
+    },
+    Pause {
+        paused: bool,
+    },
+    Protection {
+        condition: Protection,
+        duration_ms: u64,
+    },
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Protection {
+    Invincible,
+    Stasis,
+    Invulnerable,
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -232,7 +308,7 @@ impl Testing {
     fn path(&self, id: &str, suffix: &str) -> PathBuf {
         self.root.join(format!("{id}.{suffix}.json"))
     }
-    fn registration(&self, actor: i32) -> Result<Spawn> {
+    fn registration(&self, actor: i32) -> Result<Registration> {
         ensure!(actor > 0, "actor must be a positive durable character ID");
         Ok(serde_json::from_slice(
             &fs::read(self.path(&format!("actor-{actor}"), "spawn"))
@@ -381,7 +457,7 @@ async fn native_state(a: &App, t: &Testing, actors: Vec<i32>) -> Result<Value> {
         ensure!(d.worlds.values().flat_map(|w| w.players.values()).filter(|p| p.controller == crate::world::Controller::Human).all(|p| actors.contains(&p.character.id)), "every connected native participant must be configured");
         let states = actors.into_iter().map(|actor| {
             for (world,w) in &d.worlds { for (id,p) in &w.players { if p.character.id == actor {
-                let stage = if p.death_pending { "dying" } else if !p.character.alive { "dead" } else if p.native_transferring() { "transferring" } else if p.tx.as_ref().is_none_or(|o| o.packets.is_closed() || *o.lost.borrow()) { "lost" } else if p.pending || p.progress_started { "busy" } else if !p.native_ready(paused) { "loading" } else { "ready" };
+                let stage = if p.death_pending { "dying" } else if !p.character.alive { "dead" } else if p.native_transferring() { "transferring" } else if p.tx.as_ref().is_none_or(|o| o.packets.is_closed() || o.lost.borrow().is_some()) { "lost" } else if p.pending || p.progress_started { "busy" } else if !p.native_ready(paused) { "loading" } else { "ready" };
                 return json!({"actor":actor,"stage":stage,"player":id,"world":world,"world_name":w.name,"client_time":p.native_time()});
             } } }
             json!({"actor":actor,"stage":if d.character_transferring(actor){"transferring"}else{"disconnected"}})
@@ -561,11 +637,14 @@ async fn pause(a: &App, native: &[i32], sessions: &[(i32, i32)]) -> Result<()> {
         "native pause requires at most eight unique actor/session pairs"
     );
     let sessions: BTreeMap<_, _> = sessions.iter().copied().collect();
+    let app = a.clone();
     a.world.directory(move |d| {
         for (id,p) in d.worlds.values().flat_map(|w|w.players.iter()).filter(|(_,p)|p.controller == crate::world::Controller::Human) {
             ensure!(native.contains(&p.character.id), "native character {} needs coordinated Ruffle pause through the managed native client",p.character.id);
             ensure!(sessions.get(&p.character.id)==Some(id), "native pause session changed; complete the actual reconnect before suspending");
-            ensure!(!p.departing && !p.pending && !p.progress_started && !p.death_pending, "native pause requires a settled current session, not an in-flight handoff");
+            if let Some(snapshot) = p.native_pause_progress()? {
+                lifecycle::require_progress_owner(&app, snapshot.account, *id)?;
+            }
         }
         d.clock.set_paused(true);
         Ok(())
@@ -642,20 +721,25 @@ pub(crate) async fn spawn(a: &App, t: &Testing, spec: Spawn) -> Result<Value> {
         !spec.guid.is_empty() && !spec.guid.contains('@') && spec.guid.len() <= 128,
         "use an explicit disposable guest GUID, not a registered account"
     );
-    let class = a.content.get(spec.class)?;
+    a.content.get(spec.class)?;
     ensure!(
         a.content.classes.contains_key(&spec.class),
         "unknown playable class"
     );
     let mut preview = Character {
         schema: 1,
+        lifetime: crate::store::FameLifetime::complete(),
         class: spec.class,
         base: a.content.classes[&spec.class].base,
+        tex1: 0,
+        tex2: 0,
+        pet_kind: None,
         id: 1,
         account: 1,
         name: String::new(),
         level: 1,
         exp: 0,
+        xp_boost: Default::default(),
         fame: 0,
         hp: 1,
         mp: 1,
@@ -670,6 +754,15 @@ pub(crate) async fn spawn(a: &App, t: &Testing, spec: Spawn) -> Result<Value> {
         tiles: 0,
         pirate_caves: 0,
         dungeons: [0; 3],
+        jungles: 0,
+        abysses: 0,
+        trenches: 0,
+        spider_dens: 0,
+        mad_labs: 0,
+        manors: 0,
+        beaches: 0,
+        davy_lockers: 0,
+        tombs: 0,
     };
     preview.gain_experience(
         &a.content,
@@ -702,7 +795,7 @@ pub(crate) async fn spawn(a: &App, t: &Testing, spec: Spawn) -> Result<Value> {
             .profile
             .as_deref()
             .context("game_bot requires an explicit actual gameplay profile")?;
-        crate::bots::validate_test_class(spec.class, profile)?;
+        crate::bots::validate_test_profile(profile)?;
         Some(profile.to_owned())
     } else {
         ensure!(
@@ -711,12 +804,18 @@ pub(crate) async fn spawn(a: &App, t: &Testing, spec: Spawn) -> Result<Value> {
         );
         None
     };
+    a.begin_admission();
     let account = a.store.list(spec.guid.clone()).await?;
     ensure!(
         account.characters.is_empty(),
         "GUID already has a living character; no implicit replacement or reset"
     );
-    let mut ch = a.store.create_prepared(account.id, class, name).await?;
+    let mut owner = a.claim(account.id)?;
+    let t = t.clone();
+    super::lifecycle::account(a, vec![account.id], "qa_spawn", move |a| async move {
+    owner.arm_cleanup(&a, tokio::runtime::Handle::current());
+    super::lifecycle::stage(Stage::Store);
+    let mut ch = a.store.create_prepared(account.id, a.content.get(spec.class)?, name).await?;
     ch.base = preview.base;
     ch.level = preview.level;
     ch.exp = preview.exp;
@@ -734,44 +833,84 @@ pub(crate) async fn spawn(a: &App, t: &Testing, spec: Spawn) -> Result<Value> {
                 revision: ch.revision,
                 items: ch.items.clone(),
             }],
-            None,
+            Vec::new(),
         )
         .await?[0];
     a.store.progress(ch.clone()).await?;
     let actor = ch.id;
     write_json(&t.path(&format!("actor-{actor}"), "spawn"), &spec)?;
     match spec.controller {
-        Controller::Native => write_json(
-            &t.path(&format!("account-{}", ch.account), "native"),
-            &(world, pos),
-        )?,
+        Controller::Native => {
+            write_json(&t.path(&format!("account-{}", ch.account), "native"), &(world, pos))?;
+            owner.release();
+        },
         Controller::Direct => {
-            let owner = a.claim(ch.account)?;
+            let presentation = a.store.presentation(ch.account).await?;
+            let bind = super::lifecycle::binding(&a, ch.account)?;
+            super::lifecycle::stage(Stage::Publication);
             let id = a
                 .world
                 .in_world(world)
-                .call(move |w| w.enter_at(ch, None, Some(pos)))
+                .call(move |w| {
+                    let id = w.enter_at(ch, None, Some(pos), presentation)?;
+                    bind(id)?;
+                    Ok(id)
+                })
                 .await?;
-            a.bots
-                .lock()
-                .expect("ownership registry poisoned")
-                .insert(id, owner);
+            let mut bots = a.bots.lock().expect("ownership registry poisoned");
+            ensure!(!bots.contains_key(&id), "QA avatar already has a controller owner");
+            owner.publish_script(id)?;
+            bots.insert(id, owner);
         }
         Controller::GameBot => {
             crate::bots::start_test(
-                a,
+                &a,
                 ch,
                 world,
                 pos,
                 spec.profile
                     .as_deref()
                     .context("gameplay profile missing")?,
+                owner,
             )
             .await?
         }
     }
     Ok(
         json!({"actor":actor,"account":account.id,"world":world,"controller":spec.controller,"provenance":"prepared","connected":spec.controller!=Controller::Native}),
+    )
+    }).await
+}
+async fn prepare_persona(
+    a: &App,
+    t: &Testing,
+    profile: String,
+    world: i32,
+    position: Pos,
+) -> Result<Value> {
+    ensure!(
+        a.world.clock.paused(),
+        "persona fixture requires a paused prepared test session"
+    );
+    a.world
+        .in_world(world)
+        .call(move |w| {
+            ensure!(
+                position.x.is_finite() && position.y.is_finite() && w.walkable(position),
+                "persona position is blocked or outside the world"
+            );
+            Ok(())
+        })
+        .await?;
+    let ch = crate::bots::start_test_persona(a, &profile, world, position).await?;
+    let registration = Registration {
+        guid: a.store.account_guid(ch.account).await?,
+        controller: Controller::GameBot,
+        profile: Some(profile.clone()),
+    };
+    write_json(&t.path(&format!("actor-{}", ch.id), "spawn"), &registration)?;
+    Ok(
+        json!({"actor":ch.id,"account":ch.account,"profile":profile,"provenance":"prepared normal persona; ordinary replacement enabled"}),
     )
 }
 async fn resume(a: &App, t: &Testing) -> Result<()> {
@@ -801,6 +940,153 @@ async fn resume(a: &App, t: &Testing) -> Result<()> {
         })
         .await
 }
+async fn prepare_realm_capacity(a: &App, t: &Testing, limit: usize) -> Result<Value> {
+    ensure!(
+        a.world.clock.paused(),
+        "capacity setup requires a paused prepared session"
+    );
+    ensure!(
+        (1..a.max_players).contains(&limit),
+        "capacity limit must be at least one and below global capacity"
+    );
+    let path = t.root.join("prepared-realm-capacity.json");
+    ensure!(!path.exists(), "active Realm capacity was already prepared");
+    ensure!(
+        !fs::read_dir(&t.root)?
+            .collect::<std::io::Result<Vec<_>>>()?
+            .iter()
+            .any(|e| e.file_name().as_encoded_bytes().ends_with(b".spawn.json")),
+        "capacity setup must precede enrollment"
+    );
+    let owners = a.owners.clone();
+    let admission_started = a.admission_started.clone();
+    let global = a.max_players;
+    let receipt = a
+        .world
+        .directory(move |d| {
+            let claims = owners.lock().expect("ownership registry poisoned");
+            ensure!(
+                claims.is_empty(),
+                "capacity setup requires no ownership claims"
+            );
+            ensure!(
+                !admission_started.load(Ordering::Relaxed),
+                "capacity setup must precede admission"
+            );
+            let world = d.prepare_realm_capacity(limit)?;
+            let receipt =
+                json!({"world":world,"limit":limit,"global_limit":global,"provenance":"prepared"});
+            write_json(&path, &receipt)?;
+            Ok(receipt)
+        })
+        .await?;
+    Ok(receipt)
+}
+async fn prepare_guild(
+    a: &App,
+    t: &Testing,
+    actor: i32,
+    name: String,
+    members: Vec<i32>,
+) -> Result<Value> {
+    ensure!(
+        a.world.clock.paused(),
+        "guild preparation requires an explicitly paused test session"
+    );
+    let mut actors = vec![actor];
+    actors.extend(members);
+    ensure!(
+        (1..=50).contains(&actors.len())
+            && actors.iter().collect::<BTreeSet<_>>().len() == actors.len(),
+        "prepared guild requires 1–50 distinct registered actors"
+    );
+    let mut players = Vec::new();
+    let mut accounts = Vec::new();
+    for actor in &actors {
+        t.registration(*actor)?;
+        let player = resolve(a, *actor).await?;
+        let account = a
+            .world
+            .for_player(player)
+            .call(move |w| {
+                Ok(w.players
+                    .get(&player)
+                    .context("guild player missing")?
+                    .character
+                    .account)
+            })
+            .await?;
+        players.push(player);
+        accounts.push(account);
+    }
+    let guild = super::lifecycle::account(a, accounts.clone(), "qa_guild", move |a| async move {
+        super::lifecycle::stage(Stage::Reservation);
+        for player in &players {
+            let player = *player;
+            a.world
+                .for_player(player)
+                .call(move |w| {
+                    let p = w.players.get(&player).context("guild player missing")?;
+                    ensure!(
+                        p.character.alive
+                            && !p.pending
+                            && !p.progress_started
+                            && !p.death_pending
+                            && !p.departing,
+                        super::lifecycle::controller(
+                            "guild actor has pending gameplay or persistence"
+                        )
+                    );
+                    Ok(())
+                })
+                .await?;
+        }
+        super::lifecycle::stage(Stage::Store);
+        let presentations = a.store.create_prepared_guild(accounts, name).await?;
+        let guild = presentations
+            .first()
+            .context("prepared guild has no founder")?
+            .1
+            .guild
+            .clone()
+            .context("prepared membership missing after commit")?;
+        super::lifecycle::stage(Stage::Publication);
+        a.world
+            .directory(move |d| {
+                for (account, presentation) in presentations {
+                    d.sync_guild(account, presentation, false)?;
+                }
+                Ok(())
+            })
+            .await?;
+        Ok(guild)
+    })
+    .await?;
+    let mut state = snapshot(a, actor, false).await?;
+    state["prepared_guild"] = json!({"unearned":true,"guild":guild,"actors":actors,"client_publication":"next_ordinary_unpaused_tick"});
+    Ok(state)
+}
+
+async fn prepare_pause(a: &App, t: &Testing, actor: i32, paused: bool) -> Result<Value> {
+    t.registration(actor)?;
+    ensure!(
+        a.world.clock.paused(),
+        "actor pause preparation requires an explicitly paused test session"
+    );
+    let player = resolve(a, actor).await?;
+    super::lifecycle::player(a, player, "qa_pause", move |a| async move {
+        super::lifecycle::stage(Stage::Reservation);
+        a.world
+            .directory(move |d| d.prepare_actor_pause(player, paused))
+            .await
+    })
+    .await?;
+    let mut state = snapshot(a, actor, false).await?;
+    state["prepared_pause"] =
+        json!({"paused":paused,"client_publication":"next_ordinary_unpaused_tick"});
+    Ok(state)
+}
+
 async fn execute(a: &App, t: &Testing, id: &str, command: Command) -> Result<Value> {
     ensure!(
         t.stopped.borrow().is_none()
@@ -817,17 +1103,28 @@ async fn execute(a: &App, t: &Testing, id: &str, command: Command) -> Result<Val
         "native control lease expired; this prepared session is terminal"
     );
     match command {
-        Command::Capabilities => Ok(json!({"schema":1,"provenance":"prepared","pause_scope":"isolated server and all registered native clients","controllers":["direct","native","game_bot"],"game_bot_profiles":crate::bots::profiles(),"goals":["time","level","kills","pirate_caves"],"max_game_ms":600000,"trace_page_limit":40,"request_bytes_limit":MAX_REQUEST_BYTES,"mutation_limit":MAX_MUTATIONS})),
+        Command::Capabilities => Ok(json!({"schema":1,"provenance":"prepared","pause_scope":"isolated server and all registered native clients","controllers":["direct","native","game_bot"],"game_bot_profiles":crate::bots::profiles(),"goals":["time","level","kills","pirate_caves"],"max_game_ms":600000,"trace_page_limit":40,"request_bytes_limit":MAX_REQUEST_BYTES,"mutation_limit":MAX_MUTATIONS,"starting_context_operations":["prepare_realm_capacity","persona"],"prepared_realm_capacity":if t.root.join("prepared-realm-capacity.json").exists(){serde_json::from_slice::<Value>(&fs::read(t.root.join("prepared-realm-capacity.json"))?)?}else{Value::Null}})),
+        Command::PrepareRealmCapacity{limit} => prepare_realm_capacity(a,t,limit).await,
         Command::Catalog{search,limit} => {ensure!(!search.is_empty() && search.len()<=80 && (1..=20).contains(&limit),"catalog needs search and limit 1–20");let matches=a.content.objects.values().filter(|o|o.name.to_lowercase().contains(&search.to_lowercase())).collect::<Vec<_>>();Ok(json!({"items":matches.iter().take(limit).map(|o|json!({"id":o.kind,"name":o.name,"class":o.class,"slot_type":o.slot_type,"unsupported_equipment":o.unsupported_equipment})).collect::<Vec<_>>(),"omitted":matches.len().saturating_sub(limit)}))},
-        Command::WorldInfo{world} => a.world.in_world(world).call(|w|Ok(json!({"name":w.name,"width":w.map.width,"height":w.map.height,"spawn_points":w.map.spawns,"prepared_seed":w.prepared_seed,"privileged":true,"encounter_markers":w.entities.values().filter(|e|crate::endgame::GUARDIANS.contains(&e.kind)||matches!(e.kind,crate::endgame::ORYX|crate::endgame::ORYX2|0xd7a|0xd7b|0x721|0x700)).map(|e|json!({"id":e.id,"kind":e.kind,"hp":e.hp,"defense":w.content.objects[&e.kind].defense,"position":e.pos})).collect::<Vec<_>>()}))).await,
+        Command::WorldInfo{world} => a.world.in_world(world).call(|w|Ok(json!({"name":w.name,"width":w.map.width,"height":w.map.height,"realm_layout":w.realm_layout,"spawn_points":w.map.spawns,"prepared_seed":w.prepared_seed,"privileged":true,"damaging_ground":w.map.cells.iter().enumerate().filter(|(_,c)|w.content.hazards.contains_key(&c.ground)).map(|(i,_)|Pos{x:(i as i32%w.map.width) as f32+0.5,y:(i as i32/w.map.width) as f32+0.5}).filter(|p|w.walkable(*p)).take(16).collect::<Vec<_>>(),"encounter_markers":w.entities.values().filter(|e|crate::endgame::GUARDIANS.contains(&e.kind)||crate::dungeon::manor::ROSTER.contains(&e.kind)||e.kind==crate::dungeon::manor::BOOKCASE||matches!(e.kind,crate::endgame::ORYX|crate::endgame::ORYX2|crate::dungeon::pirate::BOSS|0xd05|0xd06|0xd7a|0xd7b|crate::dungeon::trench::VENT|crate::dungeon::trench::THESSAL|0x721|0x700|0xe32|0xe3e..=0xe41)).map(|e|json!({"id":e.id,"kind":e.kind,"hp":e.hp,"defense":w.content.objects[&e.kind].defense,"position":e.pos,"region":w.map.cells[(e.pos.y as i32*w.map.width+e.pos.x as i32) as usize].region})).collect::<Vec<_>>()}))).await,
         Command::Spawn{spec} => spawn(a,t,spec).await,
-        Command::World{template} => { let world=a.world.directory(move |d|d.prepared_instance(&template)).await?; Ok(json!({"world":world,"provenance":"prepared"})) },
+        Command::Persona{profile,world,position} => prepare_persona(a,t,profile,world,position).await,
+        Command::World{template,seed} => { let world=a.world.directory(move |d|match seed { Some(seed)=>d.prepared_instance_with_seed(&template,seed), None=>d.prepared_instance(&template) }).await?; Ok(json!({"world":world,"provenance":"prepared"})) },
         Command::Observe{actor} => {t.registration(actor)?;snapshot(a,actor,false).await},
         Command::Inspect{actor} => {t.registration(actor)?;snapshot(a,actor,true).await},
         Command::Resume => {resume(a,t).await?;Ok(json!({"paused":false}))},
         Command::NativeSync{actors} => native_sync(a,t,actors).await,
         Command::NativeState{actors} => native_state(a,t,actors).await,
-        Command::NativeLease{owner,operation,actors} => native_lease(a,t,owner,operation,actors).await,
+        Command::NativeLease{owner,operation,actors} => {
+            let trace = Arc::new(crate::performance::NativeControlTrace {request:id.into(),operation:operation.clone(),started:Instant::now()});
+            let requests = Arc::new(Mutex::new(crate::performance::Requests {native_control:Some(trace.clone()),..Default::default()}));
+            let mut lifecycle = NativeControlRequest {trace,requests:requests.clone(),outcome:"dropped",error:None};
+            tracing::info!(request=id,%operation,"native control request received");
+            let result = crate::performance::REQUEST.scope(requests,native_lease(a,t,owner,operation,actors)).await;
+            lifecycle.outcome = if result.is_ok() {"ok"} else {"error"};
+            lifecycle.error = result.as_ref().err().map(|error|format!("{error:#}"));
+            result
+        },
         Command::Pause{native_paused,native_sessions} => {pause(a,&native_paused,&native_sessions).await?;Ok(json!({"paused":true,"native_paused":native_paused}))},
         Command::Act{actor,action,duration_ms,pause_after} => {
             let spec=t.registration(actor)?;
@@ -838,7 +1135,7 @@ async fn execute(a: &App, t: &Testing, id: &str, command: Command) -> Result<Val
             resume(a,t).await?;
             let result: Result<Value> = async {
                 let player=resolve(a,actor).await?;
-                if let Some(plan)=a.world.for_player(player).call(move |w|w.action(player,action)).await? {persist(a,plan).await?;}
+                super::inventory(a,player,move |w|w.action(player,action)).await??;
                 tokio::time::sleep(Duration::from_millis(duration_ms)).await;
                 a.world.for_player(player).call(move |w|w.action(player,Action::Stop)).await?;
                 snapshot(a,actor,false).await
@@ -874,18 +1171,33 @@ async fn execute(a: &App, t: &Testing, id: &str, command: Command) -> Result<Val
             }}.await;
             finish_action(a,actor,result,pause_after,true).await
         },
+        Command::Cheat{actor,change:Cheat::Guild{name,members}} => prepare_guild(a,t,actor,name,members).await,
+        Command::Cheat{actor,change:Cheat::Pause{paused}} => prepare_pause(a,t,actor,paused).await,
         Command::Cheat{actor,change} => {
             t.registration(actor)?;
             ensure!(a.world.clock.paused(),"cheats require an explicitly paused test session");
             let player=resolve(a,actor).await?;
+            super::lifecycle::player(a,player,"qa_cheat",move |a| async move {
+            super::lifecycle::stage(Stage::Reservation);
             let mut ch=a.world.for_player(player).call(move |w| {let p=w.players.get(&player).context("player missing")?;ensure!(p.character.alive&&!p.pending&&!p.progress_started&&!p.death_pending&&!p.departing,"actor has pending gameplay or persistence");Ok(p.character.clone())}).await?;
             match change {
+                Cheat::StatModifier{index,amount,duration_ms}=>{a.world.for_player(player).call(move |w| w.prepare_stat_modifier(player,index,amount,duration_ms)).await?;},
+                Cheat::Protection{condition,duration_ms}=>{a.world.for_player(player).call(move |w| {
+                    ensure!((1..=60000).contains(&duration_ms),super::lifecycle::controller("prepared protection duration must be 1–60000ms"));
+                    let p=w.players.get(&player).context("player missing")?;
+                    ensure!(!crate::condition::protected(p.conditions(w.now)),super::lifecycle::controller("player protection already active"));
+                    let index=match condition {Protection::Invincible=>crate::condition::INVINCIBLE,Protection::Stasis=>crate::condition::STASIS,Protection::Invulnerable=>crate::condition::INVULNERABLE};
+                    w.apply_condition(player,index,duration_ms)?;w.updates(player,true)
+                }).await?;},
                 Cheat::Teleport{position}=>{a.world.for_player(player).call(move |w| {ensure!(position.x.is_finite()&&position.y.is_finite()&&w.walkable(position),"teleport position invalid");let p=w.players.get_mut(&player).context("player missing")?;ensure!(p.controller!=crate::world::Controller::Human,"native teleport requires a verified client correction, not a server-only edit");p.pos=position;p.bot_goal=None;w.updates(player,true)}).await?;},
                 change=>{
+                    if let Cheat::Stats{values}=&change {let values=*values;a.world.for_player(player).call(move |w| w.validate_prepared_base_stats(player,values)).await?;}
+                    super::lifecycle::stage(Stage::Store);
                     match change {
+                        Cheat::Vitals{hp,mp}=>{let stats=ch.effective(&a.content)?;ensure!((1..=stats[0]).contains(&hp)&&(0..=stats[1]).contains(&mp),"prepared vitals must be living and within effective maxima");ch.hp=hp;ch.mp=mp;},
                         Cheat::Stats{values}=>{ch.base=values;let stats=ch.effective(&a.content)?;ch.hp=ch.hp.min(stats[0]);ch.mp=ch.mp.min(stats[1]);},
-                        Cheat::Item{slot,item}=>{ensure!(slot<12,"invalid item slot");if item!=-1{a.content.get(u16::try_from(item)?)?;}ch.items[slot]=item;ch.effective(&a.content)?;ch.revision=a.store.exchange(vec![InventoryWrite{id:ch.id,account:ch.account,revision:ch.revision,items:ch.items.clone()}],None).await?[0];},
-                        Cheat::Teleport{..}=>unreachable!(),
+                        Cheat::Item{slot,item}=>{ensure!(slot<12,"invalid item slot");if item!=-1{a.content.get(u16::try_from(item)?)?;}ch.items[slot]=item;ch.effective(&a.content)?;ch.revision=a.store.exchange(vec![InventoryWrite{id:ch.id,account:ch.account,revision:ch.revision,items:ch.items.clone()}],Vec::new()).await?[0];},
+                        Cheat::Teleport{..}|Cheat::StatModifier{..}|Cheat::Guild{..}|Cheat::Pause{..}|Cheat::Protection{..}=>unreachable!(),
                     }
                     let stats = ch.effective(&a.content)?;
                     ch.hp = ch.hp.min(stats[0]); ch.mp = ch.mp.min(stats[1]);
@@ -893,6 +1205,8 @@ async fn execute(a: &App, t: &Testing, id: &str, command: Command) -> Result<Val
                     a.world.for_player(player).call(move |w|{w.players.get_mut(&player).context("player missing")?.character=ch;w.updates(player,true)}).await?;
                 }
             }
+            Ok(())
+            }).await?;
             snapshot(a,actor,false).await
         },
         Command::Result{request}=>{valid_id(&request)?;let saved:Value=serde_json::from_slice(&fs::read(t.path(&request,"receipt"))?)?;if saved["status"]=="running" {Ok(json!({"status":"incomplete","error":"request has no confirmed result; inspect trace, do not replay effects"}))}else{Ok(saved.get("receipt").context("stored receipt missing")?.clone())}},
@@ -907,7 +1221,12 @@ pub async fn command(State(a): State<App>, headers: HeaderMap, Json(raw): Json<V
         let t=a.testing.as_ref().context("testing interface requires an exclusively created --test-state directory")?;
         let request:Request=serde_json::from_value(raw.clone())?;valid_id(&request.id)?;
         if matches!(request.command,Command::Observe{..}|Command::Inspect{..}|Command::Catalog{..}|Command::WorldInfo{..}|Command::Result{..}|Command::Trace{..}|Command::Capabilities|Command::Cancel{..}|Command::NativeState{..}|Command::NativeSync{..}|Command::NativeLease{..}) {return execute(&a,t,&request.id,request.command).await;}
-        let _guard=t.gate.lock().await;
+        let entry=super::lifecycle::drain::entry(&a)?;
+        let guard=t.gate.clone().lock_owned().await;
+        let a = a.clone();
+        tokio::spawn(entry.scope(async move {
+        let _guard = guard;
+        let t=a.testing.as_ref().context("accepted QA request lost testing state")?;
         let path=t.path(&request.id,"receipt");
         if path.exists() {
             let previous:Value=serde_json::from_slice(&fs::read(path)?)?;
@@ -930,6 +1249,7 @@ pub async fn command(State(a): State<App>, headers: HeaderMap, Json(raw): Json<V
         let durable=json!({"request":raw,"receipt":receipt});
         write_json(&path,&durable)?;
         Ok(receipt)
+        })).await.context("accepted QA completion task panicked")?
     }.await;
     match result {
         Ok(v) => Json(v).into_response(),
