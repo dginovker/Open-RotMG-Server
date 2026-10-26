@@ -2,12 +2,19 @@
 
 Static audit, 16 October 2026; target: recovered **123.5.1**. Start source-first; resolve conflicts/gaps with period documentation/footage. No official provenance, fidelity, runtime/security certification or gameplay change is claimed.
 
+## Selected source policy
+
+Owner-selected priority: selected **123.5.1** client definitions, then compiled/registered Kithio C# as primary reconstruction reference; version-specific corrections override mirror values. Other community sources and period evidence resolve gaps/conflicts. This is not authenticated official source.
+
+Original seven MPGH RAR parts require login; mirror byte equivalence remains unverified. Missing/uncompiled content does not prove no drops; retain unsupported content as reconstructed. Check engine semantics (eligibility, probability units/tier expansion, ownership, repeated rolls, guarantees/caps/transformations) and file/asset reuse rights; priority grants no license.
+
 ## Pinned sources
 
-Prefer Trapped (older numeric IDs), realm-src (readable states), FSoD (coverage); compare feature-specific engine/XML semantics. Licenses below are observations, not file/asset reuse clearance; **none** means no repository-wide grant found.
+Licenses below are observations, not file/asset reuse clearance; **none** means no repository-wide grant found.
 
 | Pin | Use/caveats | License |
 | --- | --- | --- |
+| https://github.com/Zolmex/kithio-as3-source/tree/d15f321edcce0ef890001890c6991c25a1b0f718 | Primary reconstruction reference; use compiled C# paths. Original RAR equivalence unverified | none |
 | https://github.com/trapped/rotmg_svr/tree/593e490803fe0ad168ead408cacd5287d778acfe | 2013 comparator | none |
 | https://github.com/moistosaurus/realm-src/tree/1855c017eab870d13f0b61b1cf0b9e66a01922ff | Modified NR-Core 7.0; unfinished dungeons/server-side hit tracking | GPL-3.0; check AGPL integration |
 | https://github.com/moistosaurus/realm-cli/tree/a13c855dc5e09ee301fd0a66fcd303cfb5dff74e | Modified 7.0 client, not AI/2012 specification | none |
@@ -22,7 +29,6 @@ Prefer Trapped (older numeric IDs), realm-src (readable states), FSoD (coverage)
 | https://github.com/Club559/Seraphs-Dominion-Public/tree/3b3a9e06e0521ffabdb76390c2dc84f76239eeec | Custom crafting/scaling/currency | none |
 | https://github.com/Zolmex/creepylava-source/tree/a44a6e72dd85d0116ff34a819eddeaadb1bb96b4 | 2024 upload ≠ development date; ancestry unauthenticated | none |
 | https://github.com/Zolmex/mmoempire-v3-source/tree/b21be11b3a8715b727e3d85e2ee8460ae1f9b762 | Preservation comparator | none |
-| https://github.com/Zolmex/kithio-as3-source/tree/d15f321edcce0ef890001890c6991c25a1b0f718 | Includes C# server tables | none |
 | https://github.com/kaos00723/betterSkillys/tree/069d4816f45d151c7df14be84d0d04ee11d31307 | TK-Reborn; 1.0.4.0 XML/Bard/Samurai/Exalt maps, not 2012 | MIT; inherited source/map rights unverified |
 
 Boss sample: Ent Ancient, Lich, Ghost King, Phoenix Lord. All four tables were located in 13 server sources; realm-cli is client-only, NR-CORE removes the behavior library, and betterSkillys received version/lineage triage only—not verified four-boss coverage. Line-ending-normalized matches: Rotux↔FSoD (four); Club559 logic/db↔Trapped (four), logicUpd/db↔Kithio (four); Seraph↔Project-B (Ghost/Phoenix); MMOEmpire↔Trapped (Ghost/Lich/Phoenix). **Not independent corroboration.**

@@ -9,20 +9,38 @@ mod dungeon;
 mod encounter;
 mod endgame;
 mod loot;
-#[cfg(test)]
-#[path = "../examples/testing/prepared-state.rs"]
-mod prepared_state_example;
+mod navigation;
+mod performance;
+mod quest;
 mod server;
 mod store;
+mod supervision;
 mod terrain;
 mod wire;
 mod world;
 use anyhow::{Result, ensure};
 use rand::RngCore;
 use std::sync::Arc;
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if terrain::prepare::run(&args)? {
+        return Ok(());
+    }
+    let runtime = tokio::runtime::Runtime::new()?;
+    let result = runtime.block_on(serve(args));
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+    result
+}
+fn validate_client_assets(client: &std::path::Path) -> Result<()> {
+    for file in ["index.html", "vendor/ruffle.js"] {
+        ensure!(
+            client.join(file).is_file(),
+            "missing client asset {file}; run ./run.sh to download and prepare the local client"
+        );
+    }
+    Ok(())
+}
+async fn serve(args: Vec<String>) -> Result<()> {
     if backup::run(&args).await? {
         return Ok(());
     }
@@ -36,7 +54,9 @@ async fn main() -> Result<()> {
         .with_env_filter(filter)
         .json()
         .init();
+    supervision::install_panic_hook();
     let (config, dev_control) = config::Config::load(&args)?;
+    let dialogue = bots::dialogue::Service::configured(config.bot_llm)?;
     let client = config.client;
     let state = config.state;
     tracing::info!(address=%config.bind, state=%state.display(), client=%client.display(), data=%config.data.display(), "local environment selected");
@@ -46,12 +66,7 @@ async fn main() -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     }
-    for file in ["index.html", "vendor/ruffle.js"] {
-        ensure!(
-            client.join(file).is_file(),
-            "missing client asset {file}; run ./run.sh to download and prepare the local client"
-        );
-    }
+    validate_client_assets(&client)?;
     ensure!(
         client.join("client.swf").is_file(),
         "missing reference client {}; run ./run.sh to download the pinned client",
@@ -82,6 +97,7 @@ async fn main() -> Result<()> {
         testing.is_none() || !config.shore_bots,
         "prepared sessions require --no-shore-bots or shore_bots:false; spawn every controller explicitly"
     );
+    let supervisor = supervision::Supervisor::persisted(state.join("last-critical-incident.json"))?;
     let store = store::Store::open(&state.join("game.db"), &content)?;
     let directory = match &testing {
         Some(_) => world::Directory::prepared(
@@ -89,18 +105,20 @@ async fn main() -> Result<()> {
             content.clone(),
             config.max_players,
             config.realm_seed,
+            config.realm_count,
         )?,
         None => world::Directory::with_seed(
             &config.data,
             content.clone(),
             config.max_players,
             config.realm_seed,
+            config.realm_count,
         )?,
     };
     if testing.is_some() {
         directory.clock.set_paused(true);
     }
-    let world = world::Handle::spawn(directory);
+    let world = world::Handle::supervised(directory, supervisor);
     let control = if dev_control {
         let mut bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -131,12 +149,20 @@ async fn main() -> Result<()> {
         keys,
         content,
         swf,
+        browser_links: Arc::new(server::browser_link::Service::from_env(&config.origin)?),
         origin: config.origin,
+        bot_view_origin: config.bot_view_origin,
         sfx: config.data.join("sfx"),
         max_players: config.max_players,
         behind_proxy: config.behind_proxy,
         shore_bots: config.shore_bots,
+        bot_population: config.bot_population,
+        bot_session_seconds: config.bot_session_seconds,
+        dialogue,
+        society: Arc::default(),
+        cctv: Arc::default(),
         requests: Arc::default(),
+        picture_reads: Arc::default(),
         connections: Arc::new(tokio::sync::Semaphore::new(config.max_players * 2)),
         control,
         discord_link_token: match std::env::var("DISCORD_LINK_TOKEN_FILE") {
@@ -152,9 +178,17 @@ async fn main() -> Result<()> {
             Err(error) => return Err(error.into()),
         },
         owners: Arc::default(),
+        admission_started: Arc::default(),
+        admission: Arc::default(),
         authentication: Arc::default(),
+        guild_actions: Arc::default(),
+        gold_updates: Arc::default(),
+        name_claims: Arc::default(),
         bots: Arc::default(),
+        #[cfg(test)]
         quarantined: Arc::default(),
+        #[cfg(test)]
+        persona_departure_gate: Arc::default(),
         shutdown: tokio::sync::watch::channel(false).0,
     };
     server::serve(app, config.bind, client).await

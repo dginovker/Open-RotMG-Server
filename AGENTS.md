@@ -19,9 +19,15 @@ Before researching or implementing gameplay, read `docs/reference-sources.md`. S
 
 # Contributions
 
-For gameplay or visual changes, capture the before state before editing, verify the after state through normal client gameplay, and prepare the 15-second demo described in `docs/videos.md`. Use a PR when there is a good demo to show; otherwise maintainers may push validated changes directly to main. Nonvisual changes need test evidence, not a staged gameplay clip.
+Restoration gameplay PR comments identify affected IDs (https://openrotmg.org/restoration/) and revision-bound evidence; update website records. Keep implementation and historical evidence separate. Source inspection or merging is not acceptance.
 
-Develop in a separate worktree with distinct port, state directory and browser profile; see the development instructions for launcher options. Copy the four testing recipes into scratch experiments before long gameplay runs. Verify observed outcomes, not merely dispatched input. Keep experimental helpers out of feature commits; expanding shared testing infrastructure requires explicit approval.
+For gameplay or visual changes, capture screenshots before editing and after verification through normal client gameplay. PRs do not require video. Nonvisual changes need test evidence.
+
+Reuse one isolated task worktree with distinct ports, state and browser profiles. Use `python3 scripts/qa.py` for builds/tests (`cargo …`), native cases (`native CASE.mjs`) and other checks (`exec -- COMMAND …`). Put `--background` before the mode for long jobs; the printed job directory supports `status`/`cancel`. See `--help` and `examples/testing/README.md`.
+
+The runner allocates scratch and automatically cleans it after owned processes exit. Keep source/cases in the worktree; write evidence, logs, DB/state and required inputs directly to `QA_RESULTS_DIR`. Only regenerable files belong in `QA_SCRATCH_DIR`/`TMPDIR`. Do not create per-attempt source/client/cache copies, override managed Cargo storage, launch ad-hoc detached jobs or bypass runner errors. Preserve existing frozen reproductions/tool pins without migration.
+
+Keep feature cases small and assert observed outcomes, not merely dispatched input. Keep the regression suite lean; expanding shared testing infrastructure requires explicit approval.
 
 Native browser QA must use a private virtual display/compositor; see `examples/testing/README.md`. CDP input and page-local focus must not activate host windows or switch the user's desktops. Never use host `Page.bringToFront`, target activation or desktop input as a rendering repair.
 

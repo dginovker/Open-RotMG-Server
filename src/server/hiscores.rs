@@ -35,6 +35,18 @@ pub(super) async fn hiscores(State(a): State<App>) -> Response {
     .await;
     json_result(result)
 }
+pub(super) async fn graveyard(
+    State(a): State<App>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    json_result(
+        async {
+            let since = query.get("since").map_or(Ok(0), |s| s.parse::<i64>())?;
+            a.store.graveyard(since).await
+        }
+        .await,
+    )
+}
 pub(super) async fn collection(
     State(a): State<App>,
     axum::extract::Path(account): axum::extract::Path<i32>,
@@ -112,9 +124,14 @@ pub(super) async fn discord_link(
         return response;
     }
     json_result(
-        a.store
-            .redeem_discord_code(request.code, request.discord_id)
-            .await
-            .map(|name| serde_json::json!({"name":name})),
+        async {
+            let (account, name) = a
+                .store
+                .redeem_discord_code(request.code, request.discord_id)
+                .await?;
+            super::gold::sync(&a, account).await?;
+            Ok(serde_json::json!({"name":name}))
+        }
+        .await,
     )
 }
