@@ -1,0 +1,24 @@
+name: Build storage
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy && rustup default 1.94.1
+      - run: cargo --version
+      - run: |
+          python3 -B -W error::ResourceWarning -m unittest discover -s scripts -p 'test_cargo*.py'
+          python3 -B -W error::ResourceWarning -m unittest discover -s scripts -p test_run.py
+          python3 -B -W error::ResourceWarning -m unittest discover -s scripts -p test_profile.py
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked -- --test-threads=2
+        env:
+          RUST_MIN_STACK: '33554432'

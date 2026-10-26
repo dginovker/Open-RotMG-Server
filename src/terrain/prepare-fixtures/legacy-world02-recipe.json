@@ -1,0 +1,37 @@
+{
+  "schema": 2,
+  "id": "classic-world-02-reconstruction",
+  "profile": "reviewed-cells-v1",
+  "width": 2048,
+  "height": 2048,
+  "orientation": "row-major",
+  "content": {
+    "objects": "90ab4dbddadfc5adfa77f87746c376d6c611b7b3e02ec0ed8ab4f0ad91534b72",
+    "grounds": "436b596b062c141112790bb3702e4b25e639a5a27541f2a591c462cf9e1b15f7"
+  },
+  "inputs": {
+    "dictionary": {
+      "path": "world02/cells.dictionary.json",
+      "sha256": "f0b254c9ecbfa7a948903c9ae67480d31a791428e7426ef7c28bd67f72ec390b"
+    },
+    "indices": {
+      "path": "world02/cells.indices.zlib",
+      "sha256": "c7cccfe8a9d46e6f08f367c1742f9ed83644dfc16d82358135740dd74346a5b0",
+      "expanded_sha256": "f4cb5ec968adc0022409d04f9b027fff5a717747a37d932232ba9d5082a32b64"
+    }
+  },
+  "output": "classic-world-02-reconstruction.wmap",
+  "provenance": {
+    "kind": "image-guided-reconstruction-v1",
+    "source_sha256": "b6db13154d1c78d905770305df725ac912e1de10dd3b52856326e8adc0ba2547",
+    "policy": {
+      "path": "world02/source-policy.json",
+      "sha256": "95e84d316ad54cd4db0cb6c714044648ed9fccabf9ad5682af1b1b3bfd977255"
+    },
+    "annotations": {
+      "path": "world02/source-annotations.json",
+      "sha256": "78f3590d9e428973a072e7ab465007e75ccbc476e27b46e9ed4f73cd03dbfbc4"
+    },
+    "status": "Approximate image-guided reconstruction, not an authenticated original. Canonical reviewed cells are the rebuild boundary; PNG interpretation is not automated. Historical approval labels in annotations are not file dependencies; redistribution rights remain unverified. Explicit new passive-type revision on699 source-bound cells; all other four fields and all other cells preserved. Selected types and defaults do not establish original instance/cache/loot/hidden-state fidelity."
+  }
+}

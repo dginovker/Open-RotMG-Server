@@ -1,0 +1,36 @@
+World1: approximate image-guided reconstruction, not an authenticated original.
+world01.json pins the full 2100-square image and explicit NEW five-field choices;
+no PNG is bundled. Original substrates, protection, metadata and registration remain unproven.
+Normal Source1 setpieces relocate or fail rather than cover authored bare lava;
+this retention rule is NEW engineering, not recovered original placement behavior.
+Image-derived redistribution rights remain unverified; code licenses do not grant them.
+
+World2: approximate image-guided reconstruction, not an authenticated original.
+Catalogue: https://www.realmeye.com/wiki/maps-of-the-realm (https://imgur.com/UsSpU3r.png).
+world02.json pins image and canonical cell/audit identities; no source PNG is bundled.
+Full 2100-square extent retains the prior 2048-square interior at coordinates +26.
+The 215,696 outside cells newly choose quiet, blocking Dark Water188, not recovered depth/flow.
+Interior authorship retains inferred substrates/tiers, 20,571 reviewed unknown pixels,
+17,561 unidentified magenta footprints and 864 safe lava visuals. The historical crop's
+699-cell passive restoration ledger remains unchanged; original identities, instance/cache/loot
+and hidden metadata remain unproven. Normal arrivals/setpieces still apply.
+Canonical cells -> WMAP is reproducible, not PNG interpretation. Historical approval labels
+are not file dependencies; source_commit is prior authorship, not the current binary.
+Image/derivative redistribution rights remain unverified, not granted by public hosting,
+attribution, code licenses or omission of the PNG. World2 is not the MIT Perlin export.
+
+World3: image-guided reconstruction, not authenticated.
+Source: https://www.redblobgames.com/x/1745-rotmg-maps-webgl/images/world3.png
+world03.json pins image and canonical cell/audit identities; no source PNG is bundled.
+Full 2100-square extent retains the prior 2048-square interior at coordinates +26.
+The 215,696 outside cells newly choose quiet, blocking Dark Water188, not recovered depth/flow.
+The historical crop's 922-cell passive restoration ledger remains unchanged;
+original Tombstone variants/cache and other hidden fields are not recovered.
+The same rebuild and unverified image-derived rights limits apply.
+
+Retained classic-v1 generator only: Amit J Patel, Copyright 2010; MIT notice:
+MAPGEN2-LICENSE.
+
+Offline rebuild without client/state/network: openrotmg build-realm --data data --id ID
+IDs: classic-world-01-reconstruction, classic-world-02-reconstruction, classic-world-03-reconstruction.
+Add --check to compare.
