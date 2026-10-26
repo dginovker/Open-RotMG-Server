@@ -1,6 +1,7 @@
 {
   "bind": "127.0.0.1:18923",
   "origin": "https://openrotmg.org",
+  "bot_view_origin": "https://game.openrotmg.org",
   "data": "/opt/openrotmg/server/data",
   "client": "/opt/openrotmg/client",
   "state": "/var/lib/openrotmg",

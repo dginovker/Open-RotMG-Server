@@ -1,0 +1,176 @@
+{
+  "schema": 1,
+  "source_sha256": "9f57488fdccf12fc1ad5f8970d1feec746ea4e1bbc5ed6718fee7d3d4dbd55c0",
+  "source_dimensions": [
+    2100,
+    2100
+  ],
+  "support_sha256_le_u32": "4a899569757f859d8fe85b7ed06207ffa380b772ee02c87b212abc65904cd3ee",
+  "pixels": 112,
+  "rgb": "d44a00",
+  "cell": {
+    "ground": 244,
+    "object": null,
+    "config": "",
+    "terrain": 0,
+    "region": 0
+  },
+  "status": "NEW Source5 exposed southern molten-rupture engineering choice: whole112 source positions, 3 northeast flecks, 31 shoulder, 55 body, 23 southwest taper. No broad-head repair or other held lava. Selected Lava Blend244 conditional30..59 damage/slow/Sink/visual Flow, not Push. ObjectNone/configempty/terrain0/region0 are separately deliberate NEW whole-function choices, not recovered original fields, entity suppression, Source1/4/9/11 permission, navigation/protection/balance/native appearance/original fidelity/extent/registration or rights clearance. Capability data only, not a complete map or catalog entry.",
+  "source_positions_row_runs": [
+    [
+      1027,
+      969,
+      970
+    ],
+    [
+      1028,
+      967,
+      968
+    ],
+    [
+      1029,
+      966,
+      967
+    ],
+    [
+      1030,
+      964,
+      966
+    ],
+    [
+      1031,
+      963,
+      965
+    ],
+    [
+      1032,
+      961,
+      964
+    ],
+    [
+      1033,
+      960,
+      963
+    ],
+    [
+      1034,
+      959,
+      962
+    ],
+    [
+      1035,
+      957,
+      961
+    ],
+    [
+      1036,
+      956,
+      960
+    ],
+    [
+      1037,
+      954,
+      959
+    ],
+    [
+      1038,
+      953,
+      958
+    ],
+    [
+      1039,
+      951,
+      957
+    ],
+    [
+      1040,
+      950,
+      956
+    ],
+    [
+      1041,
+      949,
+      955
+    ],
+    [
+      1042,
+      948,
+      954
+    ],
+    [
+      1043,
+      947,
+      952
+    ],
+    [
+      1044,
+      946,
+      951
+    ],
+    [
+      1045,
+      945,
+      950
+    ],
+    [
+      1046,
+      943,
+      949
+    ],
+    [
+      1047,
+      942,
+      947
+    ],
+    [
+      1048,
+      941,
+      946
+    ],
+    [
+      1049,
+      940,
+      944
+    ],
+    [
+      1050,
+      939,
+      943
+    ],
+    [
+      1051,
+      938,
+      941
+    ],
+    [
+      1052,
+      937,
+      940
+    ],
+    [
+      1053,
+      936,
+      939
+    ],
+    [
+      1054,
+      935,
+      937
+    ],
+    [
+      1055,
+      934,
+      936
+    ],
+    [
+      1056,
+      933,
+      934
+    ],
+    [
+      1057,
+      932,
+      933
+    ]
+  ]
+}

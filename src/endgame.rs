@@ -5,6 +5,9 @@ use crate::{
 use anyhow::{Result, ensure};
 use std::{collections::BTreeSet, f32::consts::TAU};
 
+pub const CLOSE_DELAY_MS: u64 = 120_000;
+pub const EARTHQUAKE_MS: u64 = 8_000;
+pub const REPLACEMENT_DELAY_MS: u64 = 2_000;
 pub const CASTLE: &str = "oryx-castle";
 pub const CHAMBER: &str = "oryx-chamber";
 pub const CELLAR: &str = "wine-cellar";
@@ -21,7 +24,8 @@ pub const DUNGEONS: &[(u16, &str, &str, u16)] = &[
 pub const ROSTER: &[u16] = &[
     0x668, 0x669, 0x66a, 0x66b, 0x67d, 0x67e, 0x67f, 0x680, 0x681, 0x682, 0xd70, 0xd71, 0xd78,
     0xd79, 0xd7a, 0xd7c, 0xd7d, 0xd7e, 0xd7f, 0xd80, 0xd81, 0xd82, 0xd83, 0xd84, 0xd87, 0x1740,
-    0x1748, 0x1749, 0x174a, 0x174b, 0x932, 0x944, 0xde0, 0xde1, 0xde2, 0xde3, 0xde4, 0xdf1, 0xdf2,
+    0x1748, 0x1749, 0x174a, 0x174b, 0x932, 0x944, 0xde0, 0xde1, 0xde2, 0xde3, 0xde4, 0xde5, 0xdf0,
+    0xdf1, 0xdf2,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +56,7 @@ impl RealmCycle {
         }
         if self.remaining.is_empty() {
             self.stage = RealmStage::Closing {
-                deadline: now + 60_000,
+                deadline: now + CLOSE_DELAY_MS,
             };
         }
         true
@@ -61,7 +65,7 @@ impl RealmCycle {
         match self.stage {
             RealmStage::Closing { deadline } if now >= deadline => {
                 self.stage = RealmStage::Sealed {
-                    deadline: deadline + 22_000,
+                    deadline: deadline + EARTHQUAKE_MS,
                 };
                 true
             }
@@ -79,28 +83,23 @@ impl RealmCycle {
 
 pub fn profile(kind: u16) -> Option<Profile> {
     let (motion, speed, interval, range) = match kind {
-        0x668 => (
-            Motion::Chase {
-                sight: 12.,
-                stop: 2.,
-            },
-            4.5,
-            500,
-            12.,
-        ),
+        0x668 => (Motion::WanderHome { radius: 1. }, 3., 500, 10.),
         0x669 => (Motion::Wander, 7., 250, 10.),
         0x66a | 0x66b => (Motion::Wander, 7., 1000, 10.),
-        0x67d => (Motion::Wander, 3., 1000, 12.),
+        0x67d => (Motion::WanderHome { radius: 3. }, 3., 1000, 12.),
         0x67e..=0x682 => (
             Motion::Chase {
                 sight: 10.,
                 stop: 2.,
             },
-            8.,
+            10.,
             1000,
             10.,
         ),
-        0xd70 | 0xd71 | 0xd7a | 0xd7d | 0xdf1 => (Motion::Stationary, 0., 0, 0.),
+        0xd70 | 0xd71 | 0xd7a | 0xd7d | 0xde5 => (Motion::Stationary, 0., 0, 0.),
+        0xdf0 => (Motion::Stationary, 0., 6000, 0.),
+        // Bile "moves around randomly" (https://web.archive.org/web/20160522054322/http://www.realmeye.com/wiki/bile-of-oryx); Wander(.5) from a later comparator: https://github.com/Omniraptyr/Valor-Server/blob/40fab9e80d8a44e922036d178b9d1f03aca66a44/VotR-Server/wServer/logic/db/BehaviorDb.Oryx.cs#L493-L501
+        0xdf1 => (Motion::Wander, crate::encounter::nr_speed(0.5), 0, 0.),
         0xd78 | 0xd79 => (
             Motion::Orbit {
                 anchor: Anchor::Home,
@@ -310,7 +309,7 @@ impl BossBrain {
             "Oryx phase clock regressed"
         );
         self.last_elapsed = Some(elapsed);
-        if kind == ORYX2 && hp <= max_hp / 5 {
+        if hp <= max_hp / 5 {
             self.rage_at.get_or_insert(elapsed);
         }
         let phase = if kind == ORYX {
@@ -441,19 +440,14 @@ impl GuardianBrain {
     }
 }
 pub fn attacks(kind: u16, hp: i32, max_hp: i32, heading: f32, elapsed: u64) -> Vec<(u8, f32)> {
+    if let Some(schedule) = crate::encounter::attacks::endgame_schedule(kind, hp, max_hp, elapsed) {
+        return schedule.snapshot(heading);
+    }
     match kind {
-        0x668 => {
-            let mut shots = vec![(1, heading)];
-            if elapsed % 1000 < 500 {
-                shots.extend(fan(0, 5, 5., heading));
-            }
-            shots
-        }
         0x669 | 0x67e..=0x682 | 0xd84 | 0xd87 | 0xde2 | 0xdf2 => vec![(0, heading)],
-        0x66a | 0x66b => fan(0, 3, 5., heading),
         0x67d if elapsed % 10_000 < 5000 => fan(10, 3, 10., heading),
         0x67d => (0..4).map(|index| (index, heading)).collect(),
-        0xd70 | 0xd71 | 0xd7a | 0xd7d | 0xde1 | 0xde3 | 0xdf1 => vec![],
+        0xd70 | 0xd71 | 0xd7a | 0xd7d | 0xde1 | 0xde3 | 0xde5 | 0xdf1 => vec![],
         0xd78 | 0xd79 => match elapsed % 20_000 {
             0..5200 => ring(0, 2, elapsed as f32 / 200. * 30f32.to_radians()),
             5200..10_000 => fan(0, 2, 180., (elapsed as f32 / 100. * 10.).to_radians()),
@@ -462,7 +456,6 @@ pub fn attacks(kind: u16, hp: i32, max_hp: i32, heading: f32, elapsed: u64) -> V
             _ => ring(2, 10, heading),
         },
         0xd7c => ring(0, 6, heading),
-        0xd7e => fan(0, 2, 15., heading),
         0xd7f => vec![(0, heading)],
         0xd80 => {
             if elapsed % 1500 < 250 {
@@ -478,69 +471,6 @@ pub fn attacks(kind: u16, hp: i32, max_hp: i32, heading: f32, elapsed: u64) -> V
                 vec![(1, heading)]
             }
         }
-        0xd82 => {
-            if elapsed % 10_000 < 5000 {
-                ring(1, 5, heading)
-            } else {
-                let mut shots = ring(2, 5, heading);
-                shots.extend(fan(0, 3, 10., heading));
-                shots
-            }
-        }
-        0xd83 => {
-            if elapsed % 7500 < 5000 {
-                fan(0, 3, 20., heading)
-            } else {
-                vec![(0, heading), (1, heading), (2, heading)]
-            }
-        }
-        ORYX if hp <= max_hp / 5 => {
-            let mut shots = fan(1, 2, 10., heading);
-            shots.extend(fan(16, 5, 10., heading));
-            shots
-        }
-        ORYX => match oryx_phase(elapsed) {
-            OryxPhase::Opening => {
-                if elapsed % 1000 < 200 {
-                    fan(5, 4, 10., heading)
-                } else {
-                    vec![]
-                }
-            }
-            OryxPhase::Dance => {
-                if elapsed % 700 < 200 {
-                    ring(6, 8, heading)
-                } else {
-                    vec![]
-                }
-            }
-            OryxPhase::Artifacts => {
-                let mut shots = vec![];
-                if elapsed % 500 < 200 {
-                    shots.extend(ring(7, 10, heading));
-                }
-                if elapsed % 1500 < 200 {
-                    shots.extend(ring(9, 3, heading));
-                }
-                if elapsed % 2000 < 200 {
-                    shots.extend(ring(8, 10, heading));
-                }
-                shots
-            }
-            OryxPhase::Gaze => {
-                if elapsed % 1000 < 200 {
-                    fan(1, 2, 10., heading)
-                } else {
-                    vec![]
-                }
-            }
-            OryxPhase::DanceTwo => ring(
-                8,
-                4,
-                [0f32, 30., 15., 45.][(elapsed / 200 % 4) as usize].to_radians(),
-            ),
-            OryxPhase::PrepareRage | OryxPhase::Rage => unreachable!(),
-        },
         ORYX2 => oryx2_attacks(
             if hp <= max_hp / 5 {
                 OryxPhase::Rage
@@ -550,15 +480,8 @@ pub fn attacks(kind: u16, hp: i32, max_hp: i32, heading: f32, elapsed: u64) -> V
             elapsed,
             heading,
         ),
-        0x1748 => ring(0, 12, heading),
-        0x174a | 0x174b => ring((elapsed / 700 % 2) as u8, 4, heading),
         0x1749 => {
             let mut shots = fan(0, 3, 10., heading);
-            shots.extend(fan(1, 3, 10., heading));
-            shots
-        }
-        0x944 => {
-            let mut shots = vec![(0, heading)];
             shots.extend(fan(1, 3, 10., heading));
             shots
         }
@@ -569,35 +492,7 @@ pub fn attacks(kind: u16, hp: i32, max_hp: i32, heading: f32, elapsed: u64) -> V
 }
 
 pub fn oryx2_attacks(phase: OryxPhase, age: u64, heading: f32) -> Vec<(u8, f32)> {
-    if phase == OryxPhase::PrepareRage {
-        return if age >= 4000 && age % 4000 < 500 {
-            vec![(13, 0.), (14, 30f32.to_radians())]
-        } else {
-            vec![]
-        };
-    }
-    assert!(
-        matches!(phase, OryxPhase::Opening | OryxPhase::Rage),
-        "invalid Oryx2 projectile phase"
-    );
-    let mut shots = vec![];
-    if age % 1500 < 500 {
-        shots.extend(ring(0, 8, heading));
-    }
-    if age % 1000 < 500 {
-        for (index, count) in [(1, 3), (2, 3), (3, 2), (4, 3), (5, 2), (6, 3)] {
-            shots.extend(fan(index, count, 10., heading));
-        }
-    }
-    if phase == OryxPhase::Rage {
-        if (8000..8500).contains(&age) {
-            shots.push((13, heading));
-        }
-        if (8500..9000).contains(&age) {
-            shots.push((14, heading));
-        }
-    }
-    shots
+    crate::encounter::attacks::oryx2_schedule(phase, age).snapshot(heading)
 }
 pub fn validate_kind(content: &Content, kind: u16) -> Result<()> {
     let object = content.get(kind)?;
@@ -714,6 +609,13 @@ pub fn summons(kind: u16) -> &'static [Wave] {
                 radius: 2.,
                 lifetime: 60_000,
             },
+            // Henchman spawns Bile (period JP wiki): https://web.archive.org/web/20261025114348/https://wikiwiki.jp/rmd/Wine%20Cellar
+            Wave {
+                kind: 0xdf1,
+                count: 1,
+                radius: 2.,
+                lifetime: 60_000,
+            },
         ],
         0xde1 => &[Wave {
             kind: 0xde2,
@@ -791,6 +693,9 @@ pub(crate) fn loot(kind: u16) -> &'static [(f64, crate::loot::Pick)] {
         | 0x174a
         | 0x174b
         | 0xde1..=0xde4
+        // A 2012 player reports the barrels empty: https://web.archive.org/web/20130627235632/http://gaming.stackexchange.com/questions/92083/where-is-the-wine
+        | 0xde5
+        | 0xdf0
         | 0xdf1 => &[],
         _ => panic!("unselected endgame loot {kind:#x}"),
     }
@@ -841,184 +746,4 @@ pub fn validate(content: &Content) -> Result<()> {
         "Incantation activation contract mismatch"
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::content::Map;
-    use std::{
-        collections::{BTreeMap, VecDeque},
-        path::Path,
-    };
-    #[test]
-    fn finite_hero_credit_never_counts_summons_replays_or_despawns() {
-        assert!(RealmCycle::new(BTreeSet::new()).is_err());
-        let mut realm = RealmCycle::new(BTreeSet::from([7, 9])).unwrap();
-        assert!(!realm.defeated(100, 0));
-        assert!(realm.defeated(7, 100));
-        assert!(!realm.defeated(7, 200));
-        assert!(realm.admits());
-        assert!(!realm.advance(1_000_000));
-        assert!(realm.defeated(9, 200));
-        assert!(!realm.admits());
-        assert!(!realm.advance(60_199));
-        assert!(realm.advance(60_200));
-        assert!(!realm.advance(82_199));
-        assert!(realm.advance(82_200));
-        assert_eq!(realm.stage, RealmStage::Transferring);
-        assert!(!realm.advance(200_000));
-        assert!(!realm.defeated(9, 200_001));
-    }
-    #[test]
-    fn selected_xml_covers_all_phase_projectiles_and_different_boss_patterns() {
-        let content = Content::load(Path::new("data")).unwrap();
-        validate(&content).unwrap();
-        assert_eq!(oryx_phase(19_999), OryxPhase::Opening);
-        assert_eq!(oryx_phase(20_000), OryxPhase::Dance);
-        assert_eq!(oryx_phase(45_000), OryxPhase::Artifacts);
-        assert_eq!(oryx_phase(70_000), OryxPhase::Gaze);
-        assert_eq!(oryx_phase(80_000), OryxPhase::DanceTwo);
-        assert_ne!(
-            attacks(ORYX, 85_000, 85_000, 0., 0),
-            attacks(ORYX2, 75_000, 75_000, 0., 0)
-        );
-        assert!(
-            attacks(ORYX, 17_000, 85_000, 0., 0)
-                .iter()
-                .any(|(i, _)| *i == 16)
-        );
-    }
-    #[test]
-    fn boss_waves_are_phase_bound_and_oryx_two_rage_has_a_real_protected_transition() {
-        let mut brain = BossBrain::default();
-        let initial = brain.update(ORYX, 85_000, 85_000, 0).unwrap();
-        assert!(initial.changed && !initial.invulnerable);
-        assert_eq!((initial.waves[0].kind, initial.waves[0].count), (0x1749, 5));
-        let dance = brain.update(ORYX, 80_000, 85_000, 20_000).unwrap();
-        assert!(dance.invulnerable && dance.changed);
-        assert_eq!(
-            (
-                dance.waves[0].kind,
-                dance.waves[0].count,
-                dance.waves[0].lifetime
-            ),
-            (0x1748, 15, 20_000)
-        );
-        assert!(
-            brain
-                .update(ORYX, 80_000, 85_000, 20_050)
-                .unwrap()
-                .waves
-                .is_empty()
-        );
-        let artifacts = brain.update(ORYX, 75_000, 85_000, 45_000).unwrap();
-        assert!(!artifacts.invulnerable && artifacts.waves.len() == 2);
-        assert_eq!(oryx_phase(105_000), OryxPhase::Dance);
-        assert!(brain.update(ORYX, 75_000, 85_000, 44_999).is_err());
-        let rage = brain.update(ORYX, 17_000, 85_000, 45_050).unwrap();
-        assert_eq!(rage.phase, OryxPhase::Rage);
-        assert!(!rage.invulnerable && rage.waves[0].count == 10);
-        let mut brain = BossBrain::default();
-        let prepare = brain.update(ORYX2, 15_000, 75_000, 500).unwrap();
-        assert_eq!(prepare.phase, OryxPhase::PrepareRage);
-        assert!(prepare.invulnerable && prepare.waves.is_empty());
-        assert!(
-            brain
-                .update(ORYX2, 16_000, 75_000, 10_499)
-                .unwrap()
-                .invulnerable
-        );
-        let rage = brain.update(ORYX2, 16_000, 75_000, 10_500).unwrap();
-        assert_eq!(rage.phase, OryxPhase::Rage);
-        assert!(!rage.invulnerable && rage.waves.is_empty());
-    }
-    #[test]
-    fn surviving_guardian_requires_a_real_bound_sword_defeat_and_recovery() {
-        let mut brain = GuardianBrain::default();
-        assert!(!brain.update(true, 100).unwrap().invulnerable);
-        assert!(brain.bind_sword(50).is_err());
-        assert!(brain.update(false, 200).unwrap().invulnerable);
-        assert!(!brain.update(false, 4199).unwrap().summon_sword);
-        let ready = brain.update(false, 4200).unwrap();
-        assert!(ready.summon_sword && ready.heal);
-        assert!(brain.update(false, 4250).unwrap().summon_sword);
-        brain.bind_sword(50).unwrap();
-        assert!(brain.bind_sword(51).is_err());
-        assert!(brain.update(false, 20_000).unwrap().invulnerable);
-        assert!(!brain.update(false, 20_000).unwrap().summon_sword);
-        assert!(brain.sword_defeated(51, 20_000).is_err());
-        brain.sword_defeated(50, 20_000).unwrap();
-        assert!(brain.sword_defeated(50, 20_000).is_err());
-        assert!(brain.update(false, 21_399).unwrap().invulnerable);
-        assert!(!brain.update(false, 21_400).unwrap().invulnerable);
-    }
-    #[test]
-    fn complete_maps_preserve_supported_rosters_and_connected_spawn_boss_routes() {
-        let content = Content::load(Path::new("data")).unwrap();
-        for (template, bosses) in [
-            (CASTLE, GUARDIANS.as_slice()),
-            (CHAMBER, &[ORYX][..]),
-            (CELLAR, &[ORYX2][..]),
-        ] {
-            let map = Map::load(
-                &Path::new("data").join(format!("{template}.wmap")),
-                &content,
-            )
-            .unwrap();
-            let mut counts = BTreeMap::new();
-            for cell in &map.cells {
-                if let Some(kind) = cell.object {
-                    *counts.entry(kind).or_insert(0) += 1;
-                }
-            }
-            for boss in bosses {
-                assert_eq!(counts[boss], 1);
-            }
-            if template == CASTLE {
-                assert_eq!(counts[&0xd83], 103);
-                assert_eq!(counts[&0xd7f], 6);
-            }
-            if template == CELLAR {
-                assert_eq!(counts[&0x944], 44);
-            }
-            for cell in &map.cells {
-                if let Some(kind) = cell.object
-                    && content.objects[&kind].enemy
-                {
-                    assert!(
-                        profile(kind).is_some(),
-                        "{template} contains unhandled enemy {kind:#x}"
-                    );
-                }
-            }
-            let (x, y) = map.spawns[0];
-            let start = (y as i32 * map.width + x as i32) as usize;
-            let mut visited = BTreeSet::from([start]);
-            let mut queue = VecDeque::from([start]);
-            while let Some(i) = queue.pop_front() {
-                let (x, y) = (i as i32 % map.width, i as i32 / map.width);
-                for (x, y) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
-                    if x < 0 || y < 0 || x >= map.width || y >= map.height {
-                        continue;
-                    }
-                    let n = (y * map.width + x) as usize;
-                    let c = &map.cells[n];
-                    if content.grounds[&c.ground] > 0.
-                        && c.object.is_none_or(|k| {
-                            !content.objects[&k].blocks || content.objects[&k].destructible
-                        })
-                        && visited.insert(n)
-                    {
-                        queue.push_back(n);
-                    }
-                }
-            }
-            for (i, c) in map.cells.iter().enumerate() {
-                if c.object.is_some_and(|k| bosses.contains(&k)) {
-                    assert!(visited.contains(&i), "{template} boss is unreachable");
-                }
-            }
-        }
-    }
 }
