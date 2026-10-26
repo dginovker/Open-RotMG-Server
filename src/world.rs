@@ -5716,6 +5716,16 @@ impl World {
     }
     fn defeat_entity_with_killer(&mut self, id: i32, killer: Option<i32>) -> Result<()> {
         let e = self.remove_entity(id);
+        // Death credit must survive reward errors; the reference also notifies the Realm before loot behaviors: https://github.com/Zolmex/kithio-as3-source/blob/d15f321edcce0ef890001890c6991c25a1b0f718/Server%20Source/wServer/realm/entities/Enemy.cs#L54-L60
+        if self.encounter {
+            if crate::endgame::HEROES.contains(&e.kind) {
+                self.critical_deaths.push(e.id);
+            } else if (crate::quest::final_root(e.kind) || matches!(e.kind, 0x678 | 0xd50 | 0xd54))
+                && let Some(original) = *e.quest
+            {
+                self.critical_deaths.push(original);
+            }
+        }
         let definition = &self.content.objects[&e.kind];
         // Reference Reproduce suppresses follower XP; Pentaract Spawn explicitly allows eye XP.
         let reward = if e.kind == crate::dungeon::tomb::ANCHOR
@@ -5823,14 +5833,6 @@ impl World {
         Ok(())
     }
     fn drop_loot(&mut self, defeated: &Entity) -> Result<()> {
-        if crate::endgame::HEROES.contains(&defeated.kind) {
-            self.critical_deaths.push(defeated.id);
-        } else if (crate::quest::final_root(defeated.kind)
-            || matches!(defeated.kind, 0x678 | 0xd50 | 0xd54))
-            && let Some(original) = *defeated.quest
-        {
-            self.critical_deaths.push(original);
-        }
         if let Some(index) = crate::dungeon::DUNGEONS
             .iter()
             .position(|(_, _, name, boss)| *name == self.name && *boss == defeated.kind)

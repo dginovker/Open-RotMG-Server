@@ -1029,6 +1029,84 @@ impl World {
 }
 
 #[cfg(test)]
+#[tokio::test]
+async fn realm_death_credit_survives_portal_reward_failure() {
+    let data = std::path::Path::new("data");
+    let content = Arc::new(Content::load(data).unwrap());
+    let store = crate::store::Store::open(std::path::Path::new(":memory:"), &content).unwrap();
+    let account = store.list("closure-error-witness".into()).await.unwrap();
+    let character = store
+        .create(account.id, content.get(crate::content::WIZARD).unwrap())
+        .await
+        .unwrap();
+    let mut directory = Directory::prepared(data, content.clone(), 16, 12351, 2).unwrap();
+    let mut map = Map {
+        width: 40,
+        height: 40,
+        cells: vec![
+            crate::content::Cell {
+                ground: 0xbc,
+                object: None,
+                config: String::new(),
+                terrain: 0,
+                region: 0,
+            };
+            1600
+        ],
+        spawns: vec![(14.5, 20.5)],
+    };
+    map.cells[20 * 40 + 14].ground = 0x46;
+    let mut world = World::with_ids(content, Arc::new(map), directory.ids.clone()).unwrap();
+    world.name = "Realm".into();
+    world.encounter = true;
+    let root = world
+        .insert_entity(
+            crate::dungeon::trench::HERMIT,
+            Pos { x: 20.5, y: 20.5 },
+            vec![],
+        )
+        .unwrap();
+    world
+        .entities
+        .get_mut(&root)
+        .unwrap()
+        .quest
+        .set(Some(root), root, &mut world.quest_ids);
+    let (packets, mut inbox) = mpsc::channel(64);
+    let (lost, _) = watch::channel(None);
+    world
+        .enter(character, Some(Output { packets, lost }))
+        .unwrap();
+    while inbox.try_recv().is_ok() {}
+    directory.worlds.insert(-3, world);
+    directory.endgame.realms.remove(&-3);
+    directory
+        .bind_realm_heroes(-3, BTreeSet::from([root]))
+        .unwrap();
+    let world = directory.worlds.get_mut(&-3).unwrap();
+    let error = world.defeat_entity(root).unwrap_err();
+    assert_eq!(error.to_string(), "Hermit has no reachable reward site");
+    assert!(!world.entities.contains_key(&root));
+    assert!(world.portal_requests.is_empty());
+    directory.endgame_step(&[-3]);
+    directory.endgame_step(&[-3]);
+    let closed = chat::text_packet(
+        "#Oryx the Mad God",
+        -1,
+        0,
+        "I HAVE CLOSED THIS REALM! YOU WILL NOT LIVE TO SEE THE LIGHT OF DAY!",
+    );
+    assert_eq!(
+        std::iter::from_fn(|| inbox.try_recv().ok())
+            .filter(|p| p.id == closed.id && p.body == closed.body)
+            .count(),
+        1
+    );
+    assert!(!directory.worlds[&-3].admission_open);
+    assert!(directory.endgame.realms[&-3].cycle.remaining.is_empty());
+}
+
+#[cfg(test)]
 #[test]
 fn castle_ground_only_writes_preserve_native_scenery() {
     let content = Arc::new(Content::load(std::path::Path::new("data")).unwrap());
