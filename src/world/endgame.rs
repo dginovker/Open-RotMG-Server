@@ -1074,15 +1074,17 @@ async fn realm_death_credit_survives_portal_reward_failure() {
         .set(Some(root), root, &mut world.quest_ids);
     let (packets, mut inbox) = mpsc::channel(64);
     let (lost, _) = watch::channel(None);
-    world
+    let player = world
         .enter(character, Some(Output { packets, lost }))
         .unwrap();
     while inbox.try_recv().is_ok() {}
+    let portal = directory.endgame.realms[&-3].portal;
     directory.worlds.insert(-3, world);
     directory.endgame.realms.remove(&-3);
     directory
         .bind_realm_heroes(-3, BTreeSet::from([root]))
         .unwrap();
+    directory.endgame.realms.get_mut(&-3).unwrap().portal = portal;
     let world = directory.worlds.get_mut(&-3).unwrap();
     let error = world.defeat_entity(root).unwrap_err();
     assert_eq!(error.to_string(), "Hermit has no reachable reward site");
@@ -1104,6 +1106,111 @@ async fn realm_death_credit_survives_portal_reward_failure() {
     );
     assert!(!directory.worlds[&-3].admission_open);
     assert!(directory.endgame.realms[&-3].cycle.remaining.is_empty());
+    for (id, snapshot) in directory
+        .worlds
+        .get_mut(&-3)
+        .unwrap()
+        .pending_progress_where(|_, _| true)
+    {
+        store.progress(snapshot.clone()).await.unwrap();
+        directory
+            .worlds
+            .get_mut(&-3)
+            .unwrap()
+            .finish_progress(id, snapshot)
+            .unwrap();
+    }
+    for (tick, stage) in [
+        (2399, RealmStage::Closing { deadline: 120_000 }),
+        (2400, RealmStage::Sealed { deadline: 128_000 }),
+        (2559, RealmStage::Sealed { deadline: 128_000 }),
+    ] {
+        directory.tick = tick;
+        directory.endgame_step(&[-3]);
+        assert_eq!(directory.endgame.realms[&-3].cycle.stage, stage);
+        assert!(directory.forced_transfer_candidates().is_empty());
+        assert!(directory.endgame.realms[&-3].castle.is_none());
+    }
+    directory.tick = 2560;
+    directory.endgame_step(&[-3]);
+    let castle = directory.endgame.realms[&-3].castle.unwrap();
+    assert_eq!(directory.worlds[&castle].name, "Oryx's Castle");
+    assert_eq!(directory.forced_transfer_candidates(), [player]);
+    let transfer = directory.forced_transfer(player).unwrap().unwrap();
+    assert_eq!(transfer.destination, Some(castle));
+    assert_eq!(transfer.name, "Oryx's Castle");
+    let packet = transfer.packet();
+    assert_eq!(packet.id, 39);
+    let mut reader = crate::wire::Reader::new(&packet.body);
+    assert_eq!(reader.utf().unwrap(), "Oryx's Castle");
+    assert_eq!(reader.utf().unwrap(), "");
+    assert_eq!(reader.i32().unwrap(), 2050);
+    assert_eq!(reader.i32().unwrap(), castle);
+    assert_eq!(reader.i32().unwrap(), transfer.key_time);
+    assert_eq!(reader.i16().unwrap() as usize, transfer.key.len());
+    assert!(directory.forced_transfer(player).unwrap().is_none());
+    assert!(
+        directory
+            .consume(account.id, castle, transfer.key_time, transfer.key.clone())
+            .is_err()
+    );
+    let snapshot = directory
+        .begin_source_departure(player, None)
+        .unwrap()
+        .unwrap();
+    store.progress(snapshot.clone()).await.unwrap();
+    directory
+        .worlds
+        .get_mut(&-3)
+        .unwrap()
+        .committed(player, Ok(()))
+        .unwrap();
+    directory
+        .finish_source_departure(player, snapshot.clone(), None)
+        .unwrap();
+    directory.realm_departed(-3, player);
+    let (character, arrival) = directory
+        .consume(account.id, castle, transfer.key_time, transfer.key.clone())
+        .unwrap();
+    assert_eq!(character, snapshot.id);
+    directory
+        .admit_transfer(arrival, account.id, character, castle)
+        .unwrap();
+    let saved = store
+        .list("closure-error-witness".into())
+        .await
+        .unwrap()
+        .characters
+        .remove(0);
+    assert_eq!(saved, snapshot);
+    let arrived = directory
+        .worlds
+        .get_mut(&castle)
+        .unwrap()
+        .enter_admitted(
+            saved,
+            None,
+            None,
+            store.presentation(account.id).await.unwrap(),
+            Some(transfer.key.clone()),
+        )
+        .unwrap();
+    let current = &directory.worlds[&castle].players[&arrived].character;
+    let mut expected = snapshot;
+    assert!(current.tiles > expected.tiles);
+    assert!(current.lifetime.tiles > expected.lifetime.tiles);
+    expected.tiles = current.tiles;
+    expected.lifetime.tiles = current.lifetime.tiles;
+    assert_eq!(*current, expected);
+    assert!(
+        directory
+            .consume(account.id, castle, transfer.key_time, transfer.key)
+            .is_err()
+    );
+    println!(
+        "Castle arrival verified: closure=0ms quake=120000ms transfer=128000ms account={} character={} castle={castle}",
+        account.id, character
+    );
 }
 
 #[cfg(test)]
