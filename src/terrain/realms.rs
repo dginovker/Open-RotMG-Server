@@ -4,8 +4,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::VecDeque, path::Path, sync::Arc};
 
 use super::prepare::{
-    ScopedLava, WORLD05_ID, WORLD09_ID, WORLD11_ID, bounded_read, read_recipe, safe_path,
-    valid_hash, valid_id,
+    ScopedLava, WORLD02_ID, WORLD03_ID, WORLD05_ID, WORLD09_ID, WORLD11_ID, bounded_read,
+    read_recipe, safe_path, valid_hash, valid_id,
 };
 use serde::Deserialize;
 
@@ -40,8 +40,10 @@ impl Asset {
                 .with_context(|| format!("{} lava support {phase}", self.contract))
         } else {
             ensure!(
-                !matches!(self.id.as_str(), WORLD05_ID | WORLD09_ID | WORLD11_ID)
-                    || !map.cells.iter().any(|c| c.ground == 244),
+                !matches!(
+                    self.id.as_str(),
+                    WORLD02_ID | WORLD03_ID | WORLD05_ID | WORLD09_ID | WORLD11_ID
+                ) || !map.cells.iter().any(|c| c.ground == 244),
                 "{} requires its source-exact lava capability {phase}",
                 self.contract
             );

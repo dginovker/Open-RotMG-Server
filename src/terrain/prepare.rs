@@ -184,6 +184,9 @@ const WORLD11_SOURCE: &str = "3d3b93937ca405b4f9ce1e28d11694d2f92654acd6a4b7a11c
 const WORLD11_LAVA_SUPPORT: &str =
     "4f88fb5c98d4e7dbaa7fb6e5dde0dba336c559b9abbb99d3a8532dd2e0120b44";
 
+pub(super) const WORLD02_ID: &str = "classic-world-02-reconstruction";
+pub(super) const WORLD03_ID: &str = "classic-world-03-reconstruction";
+
 pub(super) struct ScopedLava {
     world: u8,
     terrain: u8,
@@ -209,18 +212,36 @@ impl ScopedLava {
         let world01 = r.id == "classic-world-01-reconstruction"
             || r.provenance.source_sha256 == WORLD01_SOURCE
             || policy.get("world01_lava").is_some();
+        let world23 = match r.id.as_str() {
+            WORLD02_ID => Some((
+                2,
+                "b6db13154d1c78d905770305df725ac912e1de10dd3b52856326e8adc0ba2547",
+                864,
+                "c3a7f0e93a5f3565943db894b9bbc65f68ee1828b2ebe65c91ab075682dd222b",
+                "world02_lava",
+            )),
+            WORLD03_ID => Some((
+                3,
+                "861351094192223962bc38def3c127b08c3cf80b663dd6bffb770b09ce47136e",
+                629,
+                "48e579763ea271642a779435a3baa38a3656c0d2233ad95d7da70057c460260a",
+                "world03_lava",
+            )),
+            _ => None,
+        };
         let world04 = policy.get("world04_lava").is_some();
         let world05 = policy.get("world05_lava").is_some();
         let world09 = policy.get("world09_lava").is_some();
         let world11 = policy.get("world11_lava").is_some();
         ensure!(
             u8::from(world01)
+                + u8::from(world23.is_some())
                 + u8::from(world04)
                 + u8::from(world05)
                 + u8::from(world09)
                 + u8::from(world11)
                 <= 1,
-            "mixed World1/World4/World5/World9/World11 lava scopes"
+            "mixed Realm lava scopes"
         );
         let (scope, id, source, key, schema, transform) = if world01 {
             let (side, offset, transform) = match r.schema {
@@ -247,6 +268,24 @@ impl ScopedLava {
                 "world01_lava",
                 r.schema,
                 transform,
+            )
+        } else if let Some((world, source, pixels, support, key)) = world23 {
+            // Fissures require damaging Lava Blend, not Red Quad: https://github.com/Zolmex/kithio-as3-source/blob/d15f321edcce0ef890001890c6991c25a1b0f718/Server%20Source/wServer/realm/setpieces/LavaFissure.cs#L18
+            (
+                Self {
+                    world,
+                    terrain: 1,
+                    side: 2100,
+                    source_side: 2100,
+                    offset: 0,
+                    pixels,
+                    support,
+                },
+                if world == 2 { WORLD02_ID } else { WORLD03_ID },
+                source,
+                key,
+                4,
+                source_local_transform([2100, 2100]),
             )
         } else if world04 {
             (
@@ -1328,6 +1367,12 @@ fn strict_source_audit(policy: &[u8], annotations: &[u8], recipe: &ReviewedRecip
             "schema 4 World1 requires its exact703-cell lava choice"
         );
     }
+    for (id, key) in [(WORLD02_ID, "world02_lava"), (WORLD03_ID, "world03_lava")] {
+        if recipe.id == id {
+            keys.push(key);
+            ScopedLava::binding(recipe, &policy)?.context("authored fissure lava scope missing")?;
+        }
+    }
     if recipe.id == WORLD05_ID && policy.get("world05_lava").is_some() {
         keys.push("world05_lava");
         let mut choice = lava_choice(112, WORLD05_LAVA_SUPPORT);
@@ -1663,4 +1708,31 @@ pub(crate) fn run(args: &[String]) -> Result<bool> {
         })
     );
     Ok(true)
+}
+
+#[test]
+fn authored_fissure_lava_rejects_missing_or_moved_cells() -> Result<()> {
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+    let content = Content::load(&data)?;
+    let root = data.join("realms");
+    for name in ["world02.json", "world03.json"] {
+        let Recipe::ReviewedCellsV1(recipe) = read_recipe(&root, name)? else {
+            unreachable!()
+        };
+        let (mut map, scope) = reviewed_map(&root, &recipe, &content)?;
+        let scope = scope.context("missing authored fissure lava")?;
+        scope.validate_loaded(&map, &content)?;
+        assert!(!map.cells.iter().any(|c| c.ground == 54));
+        let lava = map.cells.iter().position(|c| c.ground == 244).unwrap();
+        let rock = map
+            .cells
+            .iter()
+            .position(|c| c.ground == 96 && c.object.is_none())
+            .unwrap();
+        map.cells[lava].ground = 96;
+        assert!(scope.validate_loaded(&map, &content).is_err());
+        map.cells[rock].ground = 244;
+        assert!(scope.validate_loaded(&map, &content).is_err());
+    }
+    Ok(())
 }

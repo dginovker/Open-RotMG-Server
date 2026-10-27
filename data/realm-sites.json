@@ -26,7 +26,7 @@
     {"kind":2331,"bounds":[1473,927,13,17],"spawn":[1479,935],"scenery":19},
     {"kind":2331,"bounds":[755,1402,23,26],"spawn":[766,1414],"scenery":75}
   ]},
-  {"layout":"classic-world-02-reconstruction","sha256":"cdb1e71fc882c2d1e70af983223fe4c678a435e2e932082613f9467351ad9604","sites":[
+  {"layout":"classic-world-02-reconstruction","sha256":"c84108db3bd749c3595a1e021c8cf2e7b9fc6b640ddbad487949bf9170e99b6c","sites":[
     {"kind":2335,"bounds":[1216,337,29,29],"spawn":[1230,351],"scenery":52},
     {"kind":2335,"bounds":[1303,423,29,29],"spawn":[1317,437],"scenery":38},
     {"kind":2335,"bounds":[1192,485,29,29],"spawn":[1206,499],"scenery":45},
@@ -52,7 +52,7 @@
     {"kind":2335,"bounds":[1268,1432,29,29],"spawn":[1282,1446],"scenery":38},
     {"kind":2335,"bounds":[1369,1452,29,29],"spawn":[1383,1466],"scenery":34}
   ]},
-  {"layout":"classic-world-03-reconstruction","sha256":"7e05f1f010e28014c8f726e17937c62538aa0f5d82074329118c34972e192ebd","sites":[
+  {"layout":"classic-world-03-reconstruction","sha256":"45ed968a32b2b7df7a590db1e4eb8a9903f205b657d1e8ac6f9db18d48816992","sites":[
     {"kind":2335,"bounds":[1002,577,29,29],"spawn":[1016,591],"scenery":52},
     {"kind":2335,"bounds":[853,624,29,29],"spawn":[867,638],"scenery":29},
     {"kind":2335,"bounds":[814,692,29,29],"spawn":[828,706],"scenery":32},

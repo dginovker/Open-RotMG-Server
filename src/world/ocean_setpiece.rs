@@ -24,15 +24,7 @@ impl World {
             self.players.is_empty() && self.now == 0,
             "Hermit landmark requires an unentered Realm"
         );
-        let retain_authored_lava = matches!(
-            self.realm_layout.as_deref(),
-            Some(
-                "classic-world-01-reconstruction"
-                    | "classic-world-05-reconstruction"
-                    | "classic-world-09-reconstruction"
-                    | "classic-world-11-reconstruction"
-            )
-        );
+        let retain_authored_lava = self.retains_authored_lava();
         let protected: Vec<_> = self
             .population
             .iter()

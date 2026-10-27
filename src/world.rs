@@ -3898,14 +3898,14 @@ impl World {
     fn validate_move_at(&self, id: i32, pos: Pos, time: i32, received: u64) -> Result<f32> {
         ensure!(
             pos.x.is_finite() && pos.y.is_finite(),
-            "non-finite movement"
+            controller("non-finite movement")
         );
         let p = self.players.get(&id).context("player missing")?;
         ensure!(
             p.active(),
-            "dead, departing or quarantined player cannot move"
+            controller("dead, departing or quarantined player cannot move")
         );
-        ensure!(time >= 0, "negative movement time");
+        ensure!(time >= 0, controller("negative movement time"));
         let elapsed = if p.last_move == 0 {
             100.
         } else {
@@ -3913,15 +3913,21 @@ impl World {
         };
         ensure!(
             elapsed >= 0.,
-            "movement time reversed: client_time={time} previous_client_time={}",
-            p.last_move
+            controller("movement time reversed").context(format!(
+                "movement time reversed: client_time={time} previous_client_time={}",
+                p.last_move
+            ))
         );
         let cell = self
             .map
             .cell(p.pos.x, p.pos.y)
             .context("player outside map")?;
         let speed = p.speed(&self.content, self.now)? * self.content.grounds[&cell.ground];
-        let push = self.content.pushes[&cell.ground];
+        let push = if p.paused || p.conditions(self.now) & PARALYZED != 0 {
+            (0., 0.)
+        } else {
+            self.content.pushes[&cell.ground]
+        };
         let distance = p.pos.distance(pos);
         let input_distance = |delta| {
             p.pos.distance(Pos {
@@ -3931,16 +3937,14 @@ impl World {
         };
         ensure!(
             p.conditions(self.now) & PARALYZED == 0 || distance <= 0.001,
-            "paralyzed movement"
+            controller("paralyzed movement")
         );
         ensure!(
             input_distance(elapsed) <= speed * elapsed + 0.3,
-            "movement exceeds speed: from=({}, {}) to=({}, {}) distance={distance} allowed={} speed={speed} client_elapsed_ms={elapsed}",
-            p.pos.x,
-            p.pos.y,
-            pos.x,
-            pos.y,
-            speed * elapsed + 0.3
+            controller("movement exceeds speed").context(format!(
+                "movement exceeds speed: from=({}, {}) to=({}, {}) distance={distance} allowed={} speed={speed} client_elapsed_ms={elapsed}",
+                p.pos.x, p.pos.y, pos.x, pos.y, speed * elapsed + 0.3
+            ))
         );
         let server_elapsed = received
             .checked_sub(p.last_move_at)
@@ -3966,8 +3970,10 @@ impl World {
         );
         ensure!(
             charged <= credit + 0.001,
-            "movement exceeds server time budget: distance={distance} credit={credit} server_elapsed_ms={server_elapsed} client_elapsed_ms={elapsed} previous_credit={}",
-            p.movement_credit
+            controller("movement exceeds server time budget").context(format!(
+                "movement exceeds server time budget: distance={distance} credit={credit} server_elapsed_ms={server_elapsed} client_elapsed_ms={elapsed} previous_credit={}",
+                p.movement_credit
+            ))
         );
         let samples = (distance / 0.1).ceil().max(1.) as usize;
         ensure!(
@@ -3981,7 +3987,7 @@ impl World {
                     },
                 )
             }),
-            "movement across a blocked tile"
+            controller("movement across a blocked tile")
         );
         Ok(credit - charged)
     }
@@ -4009,26 +4015,7 @@ impl World {
         if self.discard_correcting_move(id, pos, time)? {
             return Ok(NativeInput::DiscardedUntilGotoAck);
         }
-        let sentinel = pos.x == -1. && pos.y == -1.;
-        if !sentinel {
-            self.validate_native_position(id, pos, time)?;
-        }
-        let p = self.players.get_mut(&id).context("native player missing")?;
-        ensure!(
-            time >= p.last_move,
-            controller("native movement clock regressed")
-        );
-        ensure!(received >= p.last_move_at, "native ingress clock regressed");
-        let speed = p.speed(&self.content, self.now)? * 1000.;
-        p.record_motion(if sentinel { p.pos } else { pos }, time, self.now, speed);
-        if !sentinel {
-            if p.pos.distance(pos) > 0.001 {
-                p.last_motion = Some(((pos.y - p.pos.y).atan2(pos.x - p.pos.x), self.now));
-            }
-            p.pos = pos;
-        }
-        p.last_move = time;
-        p.last_move_at = received;
+        self.move_timed(id, pos, time, received)?;
         Ok(NativeInput::Applied)
     }
     pub fn move_to(&mut self, id: i32, pos: Pos, time: i32) -> Result<()> {
@@ -4038,9 +4025,9 @@ impl World {
         let p = self.players.get(&id).context("player missing")?;
         ensure!(
             p.last_move == 0 || i64::from(time) - i64::from(p.last_move) <= 1000,
-            "movement time jump"
+            controller("movement time jump")
         );
-        // MOVE precedes condition updates; accept either form across a toggle.
+        // MOVE precedes condition updates; accept either form across a toggle: https://github.com/moistosaurus/realm-cli/blob/a13c855dc5e09ee301fd0a66fcd303cfb5dff74e/src/kabam/rotmg/messaging/impl/GameServerConnection.as#L1182-L1194
         let sentinel = pos.x == -1. && pos.y == -1.;
         let immobile = p.paused || p.conditions(self.now) & PARALYZED != 0;
         let correct = immobile && !sentinel && p.pos.distance(pos) > 0.001;
@@ -7430,6 +7417,9 @@ impl World {
 fn inside_box(a: Pos, b: Pos) -> bool {
     (a.x - b.x).abs() <= 0.5 && (a.y - b.y).abs() <= 0.5
 }
+
+#[cfg(test)]
+mod movement_tests;
 
 #[cfg(test)]
 mod death_chat_tests;

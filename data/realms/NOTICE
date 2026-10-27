@@ -11,7 +11,8 @@ world02.json pins image and canonical cell/audit identities; no source PNG is bu
 Full 2100-square extent retains the prior 2048-square interior at coordinates +26.
 The 215,696 outside cells newly choose quiet, blocking Dark Water188, not recovered depth/flow.
 Interior authorship retains inferred substrates/tiers, 20,571 reviewed unknown pixels,
-17,561 unidentified magenta footprints and 864 safe lava visuals. The historical crop's
+17,561 unidentified magenta footprints. Its 864 orange fissure cells now select damaging
+Lava Blend; original hidden fields remain unproven. The historical crop's
 699-cell passive restoration ledger remains unchanged; original identities, instance/cache/loot
 and hidden metadata remain unproven. Normal arrivals/setpieces still apply.
 Canonical cells -> WMAP is reproducible, not PNG interpretation. Historical approval labels
@@ -24,6 +25,7 @@ Source: https://www.redblobgames.com/x/1745-rotmg-maps-webgl/images/world3.png
 world03.json pins image and canonical cell/audit identities; no source PNG is bundled.
 Full 2100-square extent retains the prior 2048-square interior at coordinates +26.
 The 215,696 outside cells newly choose quiet, blocking Dark Water188, not recovered depth/flow.
+Its 629 orange fissure cells now select damaging Lava Blend; original hidden fields remain unproven.
 The historical crop's 922-cell passive restoration ledger remains unchanged;
 original Tombstone variants/cache and other hidden fields are not recovered.
 The same rebuild and unverified image-derived rights limits apply.

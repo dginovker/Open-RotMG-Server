@@ -865,6 +865,19 @@ impl World {
                 || a.distance(pos) >= 4.
         })
     }
+    pub(super) fn retains_authored_lava(&self) -> bool {
+        matches!(
+            self.realm_layout.as_deref(),
+            Some(
+                "classic-world-01-reconstruction"
+                    | "classic-world-02-reconstruction"
+                    | "classic-world-03-reconstruction"
+                    | "classic-world-05-reconstruction"
+                    | "classic-world-09-reconstruction"
+                    | "classic-world-11-reconstruction"
+            )
+        )
+    }
     fn setpiece_cell_available(
         &self,
         cell: &crate::content::Cell,
@@ -886,16 +899,7 @@ impl World {
             self.players.is_empty() && self.now == 0,
             "setpieces require an unentered Realm"
         );
-        // These reconstructions deliberately retain bare lava through normal construction.
-        let retain_authored_lava = matches!(
-            self.realm_layout.as_deref(),
-            Some(
-                "classic-world-01-reconstruction"
-                    | "classic-world-05-reconstruction"
-                    | "classic-world-09-reconstruction"
-                    | "classic-world-11-reconstruction"
-            )
-        );
+        let retain_authored_lava = self.retains_authored_lava();
         let piece = Piece::build(kind, &mut self.rng);
         ensure!(
             kind != 0xdc2 || piece.temple_ground.len() == piece.cells.len(),
