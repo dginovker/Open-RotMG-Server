@@ -44,30 +44,41 @@ pub(super) fn password(value: &str) -> Result<()> {
     );
     Ok(())
 }
-fn guest(db: &Connection, guid: &str, create: bool) -> Result<i32> {
+fn guest(db: &Connection, guid: &str, create: bool, authentication: bool) -> Result<i32> {
+    let rejected = |reason: &'static str| -> anyhow::Error {
+        if authentication {
+            InvalidCredentials.into()
+        } else {
+            anyhow::anyhow!(reason)
+        }
+    };
     // Reserve the email namespace so an empty password can never create a shadow login.
-    ensure!(
-        !guid.is_empty()
-            && guid.len() <= 128
-            && guid
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
-        "invalid guest identity"
-    );
+    if !(!guid.is_empty()
+        && guid.len() <= 128
+        && guid
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)))
+    {
+        return Err(rejected("invalid guest identity"));
+    }
     let found: Option<(i32, bool)> = db.query_row(
         "SELECT id,EXISTS(SELECT 1 FROM credentials WHERE account=accounts.id) FROM accounts WHERE guid=?1",
         [guid], |r| Ok((r.get(0)?,r.get(1)?)),
     ).optional()?;
     if let Some((id, registered)) = found {
-        ensure!(
-            !registered,
-            "guest identity has been converted; sign in with your email and password"
-        );
+        if registered {
+            return Err(rejected(
+                "guest identity has been converted; sign in with your email and password",
+            ));
+        }
         return Ok(id);
     }
-    ensure!(create, "unknown guest; load character list first");
+    if !create {
+        return Err(rejected("unknown guest; load character list first"));
+    }
     db.execute("INSERT INTO accounts(guid,name) VALUES(?1,'Guest')", [guid])?;
     let id = i32::try_from(db.last_insert_rowid())?;
+    vaults::provision(db, id)?;
     db.execute(
         "INSERT INTO account_fame(account,balance,earned) VALUES(?1,0,0)",
         [id],
@@ -78,31 +89,132 @@ fn guest(db: &Connection, guid: &str, create: bool) -> Result<i32> {
     )?;
     Ok(id)
 }
+pub(super) fn human_name_taken(db: &Connection, name: &str, except: i32) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM accounts WHERE id!=?2 AND name=?1 COLLATE NOCASE AND (NOT EXISTS(SELECT 1 FROM shore_bots WHERE account=accounts.id) OR EXISTS(SELECT 1 FROM credentials WHERE account=accounts.id)))",
+        params![name, except], |r| r.get(0),
+    )?)
+}
+
+pub(super) fn named_account(db: &Connection, name: &str) -> Result<Option<i32>> {
+    // Historical persona rows keep their names after a human claims the active name.
+    let (humans, human, oldest): (i32, Option<i32>, Option<i32>) = db.query_row(
+        "WITH matching AS (
+            SELECT id,NOT EXISTS(SELECT 1 FROM shore_bots WHERE account=accounts.id)
+                OR EXISTS(SELECT 1 FROM credentials WHERE account=accounts.id) AS human
+            FROM accounts WHERE name=?1 COLLATE NOCASE
+        ) SELECT count(*) FILTER(WHERE human),min(id) FILTER(WHERE human),min(id) FROM matching",
+        [name],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    ensure!(
+        humans <= 1,
+        Rejected("Ambiguous human name ownership; contact the server operator.")
+    );
+    Ok(if humans == 1 { human } else { oldest })
+}
+
+type NameChoiceReady = (i32, i32, Vec<i32>);
+
+fn name_choice_check(
+    db: &Connection,
+    account: i32,
+    name: &str,
+    allow_paid: bool,
+) -> Result<std::result::Result<NameChoiceReady, &'static str>> {
+    if !(3..=10).contains(&name.len()) || !name.bytes().all(|c| c.is_ascii_alphabetic()) {
+        return Ok(Err("names must be 3–10 letters"));
+    }
+    let (current, registered, balance): (String, bool, i32) = db.query_row(
+        "SELECT name,EXISTS(SELECT 1 FROM credentials WHERE account=accounts.id),credits FROM accounts WHERE id=?1",
+        [account], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    ensure!(balance >= 0, "invalid account Gold balance");
+    if !registered {
+        return Ok(Err("register before choosing a name"));
+    }
+    let price = if name_chosen(account, &current) {
+        1000
+    } else {
+        0
+    };
+    if price > 0 && !allow_paid {
+        return Ok(Err("Paid name changes must be made in game."));
+    }
+    if human_name_taken(db, name, 0)? {
+        return Ok(Err("name already taken"));
+    }
+    if balance < price {
+        return Ok(Err("Not enough Gold."));
+    }
+    let bots = db
+        .prepare("SELECT id FROM accounts WHERE name=?1 COLLATE NOCASE ORDER BY id")?
+        .query_map([name], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Ok((price, balance, bots)))
+}
+
 impl Store {
+    #[cfg(test)]
     pub async fn choose_name(&self, account: i32, name: String) -> Result<()> {
-        ensure!(
-            (3..=10).contains(&name.len()) && name.bytes().all(|c| c.is_ascii_alphabetic()),
-            "names must be 3–10 letters"
-        );
+        match self.claim_name_choice(account, name, false, vec![]).await? {
+            NameChoice::Committed { .. } => Ok(()),
+            NameChoice::Rejected(reason) => Err(Rejected(reason).into()),
+        }
+    }
+    pub(crate) async fn prepare_name_choice(
+        &self,
+        account: i32,
+        name: String,
+        allow_paid: bool,
+    ) -> Result<std::result::Result<Vec<i32>, &'static str>> {
         self.call(move |db| {
-            let tx = db.transaction()?;
-            let (current, registered): (String, bool) = tx.query_row(
-                "SELECT name,EXISTS(SELECT 1 FROM credentials WHERE account=accounts.id) FROM accounts WHERE id=?1",
-                [account], |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            ensure!(registered, "register before choosing a name");
-            ensure!(!name_chosen(account, &current), "paid name changes are not implemented");
-            let taken: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE name=?1 COLLATE NOCASE)", [&name], |r| r.get(0))?;
-            ensure!(!taken, "name already taken");
-            tx.execute("UPDATE accounts SET name=?2 WHERE id=?1", params![account,name])?;
+            Ok(name_choice_check(db, account, &name, allow_paid)?.map(|(_, _, bots)| bots))
+        })
+        .await
+    }
+    pub(crate) async fn claim_name_choice(
+        &self,
+        account: i32,
+        name: String,
+        allow_paid: bool,
+        stopped: Vec<i32>,
+    ) -> Result<NameChoice> {
+        self.call(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let (price, balance, bots) = match name_choice_check(&tx, account, &name, allow_paid)? {
+                Ok(ready) => ready,
+                Err(reason) => return Ok(NameChoice::Rejected(reason)),
+            };
+            // Store-only callers cannot publish over a controller they have not settled.
+            if bots.iter().any(|id| !stopped.contains(id)) {
+                return Ok(NameChoice::Rejected("name already taken"));
+            }
+            let balance = balance - price;
+            ensure!(
+                tx.execute(
+                    "UPDATE accounts SET name=?2,credits=?3 WHERE id=?1",
+                    params![account, name, balance]
+                )? == 1,
+                "name choice account missing"
+            );
             tx.commit()?;
-            Ok(())
-        }).await
+            tracing::info!(
+                account,
+                name,
+                price,
+                balance,
+                ?stopped,
+                "account name choice committed"
+            );
+            Ok(NameChoice::Committed { balance })
+        })
+        .await
     }
     pub(super) async fn guest(&self, guid: String, create: bool) -> Result<i32> {
         self.call(move |db| {
             let tx = db.transaction()?;
-            let id = guest(&tx, &guid, create)?;
+            let id = guest(&tx, &guid, create, true)?;
             tx.commit()?;
             Ok(id)
         })
@@ -129,7 +241,7 @@ impl Store {
         let id = self
             .call(move |db| {
                 let tx = db.transaction()?;
-                let id = guest(&tx, &guid, true)?;
+                let id = guest(&tx, &guid, true, false)?;
                 let exists: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM credentials WHERE email=?1)",
                     [&email],
@@ -154,8 +266,8 @@ impl Store {
         if clear.is_empty() {
             return self.guest(guid, false).await;
         }
-        let email = email(&guid).map_err(|_| anyhow::anyhow!("invalid email or password"))?;
-        password(&clear).map_err(|_| anyhow::anyhow!("invalid email or password"))?;
+        let email = email(&guid).map_err(|_| InvalidCredentials)?;
+        password(&clear).map_err(|_| InvalidCredentials)?;
         let found: Option<(i32, String)> = self
             .call(move |db| {
                 Ok(db
@@ -187,204 +299,8 @@ impl Store {
             }
         })
         .await??;
-        ensure!(valid, "invalid email or password");
-        let (id, _) = found.context("invalid email or password")?;
+        ensure!(valid, InvalidCredentials);
+        let (id, _) = found.ok_or(InvalidCredentials)?;
         Ok(id)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn store(name: &str) -> (Store, Content, std::path::PathBuf) {
-        let path = std::env::temp_dir().join(format!(
-            "openrotmg-{name}-{}-{}.db",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let content = Content::load(Path::new("data")).unwrap();
-        (Store::open(&path, &content).unwrap(), content, path)
-    }
-    #[tokio::test]
-    async fn conversion_retains_every_save_and_revokes_guest_access_across_restart() {
-        let (s, c, path) = store("registration");
-        let a = s.list("native-guest".into()).await.unwrap();
-        s.rename(a.id, "Restorer".into()).await.unwrap();
-        let ch = s.create(a.id, c.get(WIZARD).unwrap()).await.unwrap();
-        let vault = s.vault(a.id).await.unwrap();
-        assert_eq!(
-            s.register(
-                "native-guest".into(),
-                "Player@Example.org".into(),
-                "native-password".into()
-            )
-            .await
-            .unwrap(),
-            a.id
-        );
-        assert!(s.list("native-guest".into()).await.is_err());
-        assert!(
-            s.authenticate("native-guest".into(), String::new())
-                .await
-                .is_err()
-        );
-        assert!(
-            s.characters("player@example.org".into(), String::new())
-                .await
-                .is_err()
-        );
-        assert!(
-            s.authenticate("player@example.org".into(), "wrong-password".into())
-                .await
-                .is_err()
-        );
-        assert!(
-            s.authenticate("missing@example.org".into(), "native-password".into())
-                .await
-                .is_err()
-        );
-        assert!(
-            s.register(
-                "native-guest".into(),
-                "other@example.org".into(),
-                "native-password".into()
-            )
-            .await
-            .is_err()
-        );
-        let other = s.list("other-guest".into()).await.unwrap();
-        assert!(
-            s.register(
-                "other-guest".into(),
-                "PLAYER@example.org".into(),
-                "native-password".into()
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(s.list("other-guest".into()).await.unwrap().id, other.id);
-        let reopened = Store::open(&path, &c).unwrap();
-        let loaded = reopened
-            .characters("PLAYER@EXAMPLE.ORG".into(), "native-password".into())
-            .await
-            .unwrap();
-        assert_eq!(
-            (loaded.id, loaded.name.as_str(), loaded.characters[0].id),
-            (a.id, "Restorer", ch.id)
-        );
-        assert_eq!(loaded.characters[0].items, ch.items);
-        assert_eq!(reopened.vault(a.id).await.unwrap().items, vault.items);
-        let db = Connection::open(path).unwrap();
-        let verifier: String = db
-            .query_row("SELECT password_hash FROM credentials", [], |r| r.get(0))
-            .unwrap();
-        assert!(verifier.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
-        assert!(!verifier.contains("native-password"));
-    }
-    #[tokio::test]
-    async fn native_name_choice_is_registered_unique_and_one_time() {
-        let (s, _, _) = store("name-choice");
-        let guest = s.list("name-guest".into()).await.unwrap();
-        assert!(!guest.xml().contains("<NameChosen/>"));
-        let content = Content::load(Path::new("data")).unwrap();
-        let ch = s
-            .create(guest.id, content.get(WIZARD).unwrap())
-            .await
-            .unwrap();
-        assert!(s.choose_name(guest.id, "Pilot".into()).await.is_err());
-        s.register(
-            "name-guest".into(),
-            "pilot@example.org".into(),
-            "password".into(),
-        )
-        .await
-        .unwrap();
-        s.choose_name(guest.id, "Pilot".into()).await.unwrap();
-        let a = s
-            .characters("pilot@example.org".into(), "password".into())
-            .await
-            .unwrap();
-        assert_eq!(a.name, "Pilot");
-        assert_eq!(s.load(guest.id, ch.id).await.unwrap().name, "Pilot");
-        assert!(a.xml().contains("<NameChosen/>"));
-        assert!(s.choose_name(guest.id, "Renamed".into()).await.is_err());
-        let second = s
-            .register(
-                "other-namer".into(),
-                "second@example.org".into(),
-                "password".into(),
-            )
-            .await
-            .unwrap();
-        assert!(s.choose_name(second, "pILot".into()).await.is_err());
-        assert!(s.choose_name(second, "Bad123".into()).await.is_err());
-        s.choose_name(second, "Keeper".into()).await.unwrap();
-    }
-    #[tokio::test]
-    async fn corrupt_verifier_is_not_reported_as_a_wrong_password() {
-        let (s, _, _) = store("corrupt-verifier");
-        s.register("guest".into(), "x@example.org".into(), "password".into())
-            .await
-            .unwrap();
-        s.call(|db| {
-            db.execute("UPDATE credentials SET password_hash='invalid'", [])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            s.authenticate("x@example.org".into(), "password".into())
-                .await
-                .unwrap_err()
-                .to_string(),
-            "invalid stored password verifier"
-        );
-    }
-    #[tokio::test]
-    async fn concurrent_conversion_has_one_winner_and_failed_validation_changes_nothing() {
-        let (s, _, _) = store("registration-race");
-        let a = s.list("racing-guest".into()).await.unwrap();
-        let long_email = format!(
-            "{}@{}.{}.{}",
-            "a".repeat(64),
-            "b".repeat(63),
-            "c".repeat(63),
-            "d".repeat(61)
-        );
-        for (email, pw) in [
-            ("bad", "native-password"),
-            ("x@y.org", "tiny"),
-            ("x@@y.org", "native-password"),
-            (long_email.as_str(), "native-password"),
-        ] {
-            assert!(
-                s.register("racing-guest".into(), email.into(), pw.into())
-                    .await
-                    .is_err()
-            );
-        }
-        assert_eq!(s.list("racing-guest".into()).await.unwrap().id, a.id);
-        let (first, second) = tokio::join!(
-            s.register(
-                "racing-guest".into(),
-                "a@example.org".into(),
-                "native-password".into()
-            ),
-            s.register(
-                "racing-guest".into(),
-                "b@example.org".into(),
-                "native-password".into()
-            )
-        );
-        assert_ne!(first.is_ok(), second.is_ok());
-        assert_eq!(
-            s.call(
-                |db| Ok(db.query_row("SELECT count(*) FROM credentials", [], |r| r
-                    .get::<_, i32>(0))?)
-            )
-            .await
-            .unwrap(),
-            1
-        );
     }
 }

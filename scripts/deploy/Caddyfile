@@ -1,22 +1,117 @@
 www.openrotmg.org {
-    redir https://openrotmg.org{uri} permanent
-}
-
-openrotmg.org {
     encode zstd gzip
     header {
         X-Content-Type-Options nosniff
         Referrer-Policy strict-origin-when-cross-origin
     }
-    @recovery path /recover /recover/* /api/account/recover
+    redir /2010 /2010/ 308
+    @preview2010_api path /2010/game /2010/legacy/char/list /2010/legacy/servers.txt
+    handle @preview2010_api {
+        uri strip_prefix /2010
+        reverse_proxy 127.0.0.1:18910 {
+            header_up X-Forwarded-For {http.request.remote.host}
+        }
+    }
+    handle_path /2010/vendor/* {
+        root * /opt/openrotmg-2010/public/vendor
+        file_server
+    }
+    @preview2010_swf path /2010/client-data-repaired.swf /2010/original-client.swf
+    handle @preview2010_swf {
+        uri strip_prefix /2010
+        root * /opt/openrotmg-2010/public
+        file_server
+    }
+    @preview2010_pages path /2010/*
+    handle @preview2010_pages {
+        root * /opt/openrotmg/site
+        file_server
+    }
+    @preview2010_style path /style.css /amulet-of-resurrection.png
+    handle @preview2010_style {
+        root * /opt/openrotmg/site
+        file_server
+    }
+    handle {
+        redir https://openrotmg.org{uri} permanent
+    }
+}
+
+openrotmg.org {
+    encode zstd gzip {
+        match {
+            header Content-Type application/*
+            header Content-Type text/*
+            header Content-Type font/*
+            header Content-Type image/svg+xml*
+            header Content-Type image/x-icon*
+            header Content-Type image/vnd.microsoft.icon*
+            header Content-Type multipart/bag*
+            header Content-Type multipart/mixed*
+        }
+    }
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+    @recovery path /recover /recover/* /link /link/* /api/account/recover /api/account/browser /api/account/browser/* /api/account/link/*
     header @recovery Cache-Control "no-store"
     header @recovery >Referrer-Policy "no-referrer"
-    header @recovery Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    header @recovery Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://game.openrotmg.org; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     @private path /dev /dev/* /internal /internal/*
     handle @private {
         respond "Development control is not public" 403
     }
-    @backend path /game /client.swf /legacy-api/* /vendor/* /sfx/* /health /api/hiscores /api/collection/* /api/account/recover /api/diagnostics/* /api/bug-reports/*
+    @preview2010 path /2010 /2010/*
+    redir @preview2010 https://www.openrotmg.org{uri} 308
+    @backend path /game /client.swf /legacy-api/* /vendor/* /sfx/* /health /api/*
+    handle @backend {
+        reverse_proxy 127.0.0.1:18923 {
+            header_up X-Forwarded-For {http.request.remote.host}
+        }
+    }
+    handle {
+        root * /opt/openrotmg/site
+        file_server
+    }
+}
+
+game.openrotmg.org {
+    encode zstd gzip
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+    @website header Origin https://openrotmg.org
+    header @website {
+        Access-Control-Allow-Origin https://openrotmg.org
+        Access-Control-Allow-Credentials true
+        +Vary Origin
+    }
+    @preflight {
+        method OPTIONS
+        header Origin https://openrotmg.org
+    }
+    handle @preflight {
+        header Access-Control-Allow-Methods "GET, POST"
+        header Access-Control-Allow-Headers Content-Type
+        header Access-Control-Max-Age 600
+        respond "" 204
+    }
+    @other_preflight method OPTIONS
+    handle @other_preflight {
+        respond "Request origin denied" 403
+    }
+    @private path /dev /dev/* /internal /internal/*
+    handle @private {
+        respond "Development control is not public" 403
+    }
+    @callback_assets path /api/account/link/callback/index.html /api/account/link/callback/callback.js
+    handle @callback_assets {
+        root * /opt/openrotmg/site
+        file_server
+    }
+    @backend path /game /client.swf /legacy-api/* /vendor/* /sfx/* /health /api/*
     handle @backend {
         reverse_proxy 127.0.0.1:18923 {
             header_up X-Forwarded-For {http.request.remote.host}

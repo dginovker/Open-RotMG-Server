@@ -1,0 +1,774 @@
+use crate::{
+    content::{Cell, Content, Map},
+    encounter::{Motion, Profile},
+};
+use anyhow::{Context, Result, ensure};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
+use std::f32::consts::TAU;
+
+pub const PORTAL: u16 = 0x72c;
+pub const SPHINX: u16 = 0xd54;
+pub const NUT: u16 = 0xd26;
+pub const GEB: u16 = 0xd27;
+pub const BES: u16 = 0xd28;
+pub const BOSSES: [u16; 3] = [NUT, GEB, BES];
+pub const STATUES: [u16; 3] = [0xd3d, 0xd3e, 0xd3f];
+pub const ANCHOR: u16 = 0xd25;
+pub const SARCOPHAGUS: u16 = 0xd29;
+pub const TREASURE: u16 = 0xd2c;
+pub const SWITCH: u16 = 0xd37;
+pub const TRAP: u16 = 0xd38;
+pub const DISABLED_TRAP: u16 = 0xd39;
+pub const EXIT: u16 = 0xd40;
+pub const QUICKSAND: u8 = 0xbf;
+pub const MISSING_TILE: u8 = 0xe3;
+pub const WALL: u16 = 0x1dd;
+
+pub fn immortal(kind: u16) -> bool {
+    matches!(kind, ANCHOR | 0xd31..=0xd39 | 0xd3d..=0xd3f)
+}
+
+pub fn initial_condition(kind: u16) -> i32 {
+    if matches!(kind, ANCHOR | SWITCH | TRAP | 0xd3d..=0xd3f) {
+        crate::condition::bit(crate::condition::INVULNERABLE)
+    } else if BOSSES.contains(&kind) {
+        crate::condition::bit(crate::condition::ARMORED)
+    } else {
+        0
+    }
+}
+
+pub fn contains(kind: u16) -> bool {
+    (0xd10..=0xd3f).contains(&kind)
+}
+
+pub fn profile(kind: u16) -> Option<Profile> {
+    contains(kind).then_some(Profile {
+        motion: Motion::Stationary,
+        speed: 0.,
+        interval: 50,
+        range: 30.,
+    })
+}
+
+pub fn validate(content: &Content, kind: u16) -> Result<()> {
+    ensure!(contains(kind), "unknown Tomb actor {kind:#x}");
+    let count = match kind {
+        NUT => 9,
+        GEB => 6,
+        BES => 5,
+        0xd11 | 0xd13 | 0xd15 | 0xd3c => 4,
+        0xd3a => 3,
+        0xd1a | 0xd1b | 0xd1c..=0xd1e | 0xd2a | 0xd2b | 0xd3b => 2,
+        ANCHOR | TREASURE | 0xd2d..=0xd30 | SWITCH..=0xd3f => 0,
+        _ => 1,
+    };
+    for index in 0..count {
+        ensure!(
+            content.get(kind)?.projectiles.contains_key(&index),
+            "Tomb actor {kind:#x} lacks selected projectile {index}"
+        );
+    }
+    Ok(())
+}
+
+fn center(room: usize) -> (i32, i32) {
+    (16 + room as i32 % 5 * 32, 16 + room as i32 / 5 * 32)
+}
+fn footprint_centers(seed: u64, events: &[usize]) -> [(i32, i32); 25] {
+    // Placement must not consume graph, room-size, corridor or encounter RNG draws.
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x746f_6d62_706c_6163);
+    std::array::from_fn(|room| {
+        let (x, y) = center(room);
+        // Pin all eight neighbors so shifted floors cannot change the boss boundary walls.
+        if room == 12
+            || [6, 7, 8, 11, 13, 16, 17, 18].contains(&room)
+            || events.contains(&room)
+            || room % 7 == 0
+        {
+            (x, y)
+        } else {
+            (x + rng.gen_range(-3..=3), y + rng.gen_range(-3..=3))
+        }
+    })
+}
+fn index(x: i32, y: i32) -> usize {
+    (y * 164 + x) as usize
+}
+// Reconstructed map-wide bands avoid room seams: https://discord.com/channels/1558662335076376578/1558662336439386185/1563883820896493629
+fn missing_tile_at(x: i32, y: i32, phase: i32) -> bool {
+    (x + 2 * y + phase).rem_euclid(13) < 3
+}
+fn apply_floor_pattern(map: &mut Map, rooms: &[usize], events: &[usize], phase: i32) {
+    for y in 0..map.height {
+        for x in 0..map.width {
+            let cell = &mut map.cells[(y * map.width + x) as usize];
+            if cell.region != 0
+                || !matches!(cell.ground, 0xe0 | 0xe2)
+                || !missing_tile_at(x, y, phase)
+            {
+                continue;
+            }
+            let protected = rooms.iter().any(|&room| {
+                let extent = if room == 12 {
+                    19
+                } else if events.contains(&room) || room % 7 == 0 {
+                    10
+                } else {
+                    return false;
+                };
+                let (cx, cy) = center(room);
+                (x - cx).abs() <= extent && (y - cy).abs() <= extent
+            });
+            if !protected {
+                cell.ground = MISSING_TILE;
+            }
+        }
+    }
+}
+fn adjacent(a: usize, b: usize) -> bool {
+    let (x, y) = (a % 5, a / 5);
+    let (u, v) = (b % 5, b / 5);
+    x.abs_diff(u) + y.abs_diff(v) == 1
+        || ((a == 12 || b == 12) && x.abs_diff(u) == 1 && y.abs_diff(v) == 1)
+}
+fn put(map: &mut Map, x: i32, y: i32, kind: u16) -> Result<()> {
+    let cell = &mut map.cells[index(x, y)];
+    ensure!(
+        cell.ground != 0xff && cell.object.is_none(),
+        "blocked Tomb placement {kind:#x} at {x},{y}"
+    );
+    cell.object = Some(kind);
+    Ok(())
+}
+
+pub fn generate(content: &Content, seed: u64) -> Result<Map> {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let rooms: Vec<usize> = (0..25).filter(|r| ![7, 11, 13, 17].contains(r)).collect();
+    let mut joined = vec![12];
+    let mut links = Vec::new();
+    while joined.len() < rooms.len() {
+        let frontier: Vec<_> = joined
+            .iter()
+            .flat_map(|a| rooms.iter().map(move |b| (*a, *b)))
+            .filter(|(a, b)| !joined.contains(b) && adjacent(*a, *b))
+            .collect();
+        let &(a, b) = frontier
+            .choose(&mut rng)
+            .context("Tomb room graph disconnected")?;
+        links.push((a, b));
+        joined.push(b);
+    }
+    let degree = |room: usize, links: &[(usize, usize)]| {
+        links
+            .iter()
+            .filter(|(a, b)| *a == room || *b == room)
+            .count()
+    };
+    while rooms
+        .iter()
+        .filter(|r| **r != 12 && degree(**r, &links) == 1)
+        .count()
+        > 5
+    {
+        let choices: Vec<_> = rooms
+            .iter()
+            .filter(|r| **r != 12 && degree(**r, &links) == 1)
+            .flat_map(|a| rooms.iter().map(move |b| (*a, *b)))
+            .filter(|(a, b)| {
+                adjacent(*a, *b) && !links.contains(&(*a, *b)) && !links.contains(&(*b, *a))
+            })
+            .collect();
+        let edge = *choices
+            .choose(&mut rng)
+            .context("Tomb dead end cannot be connected")?;
+        links.push(edge);
+    }
+    let mut events: Vec<_> = rooms
+        .iter()
+        .copied()
+        .filter(|r| *r != 12 && degree(*r, &links) == 1)
+        .collect();
+    let mut other: Vec<_> = rooms
+        .iter()
+        .copied()
+        .filter(|r| *r != 12 && !events.contains(r))
+        .collect();
+    other.shuffle(&mut rng);
+    events.extend(other.into_iter().take(5 - events.len()));
+    events.shuffle(&mut rng);
+    // Prefer the September 2012 guide's guaranteed treasure over later rare-room rules.
+    events.truncate(rng.gen_range(3..=5));
+    let choices: Vec<_> = rooms
+        .iter()
+        .copied()
+        .filter(|r| *r != 12 && !events.contains(r))
+        .collect();
+    let treasure = *choices
+        .choose(&mut rng)
+        .context("Tomb treasure room site missing")?;
+    let treasures = [treasure];
+    events.push(treasure);
+    let footprints = footprint_centers(seed, &events);
+    let mut map = Map {
+        width: 164,
+        height: 164,
+        cells: vec![
+            Cell {
+                ground: 0xff,
+                object: None,
+                config: String::new(),
+                terrain: 0,
+                region: 0
+            };
+            164 * 164
+        ],
+        spawns: vec![(80.5, 81.5)],
+    };
+    // The original generator was not recovered; do not import unlicensed community maps.
+    for &room in &rooms {
+        let (cx, cy) = footprints[room];
+        let (rx, ry) = if room == 12 {
+            (19, 19)
+        } else if events.contains(&room) {
+            (10, 10)
+        } else {
+            (rng.gen_range(7..=10), rng.gen_range(7..=10))
+        };
+        for y in cy - ry..=cy + ry {
+            for x in cx - rx..=cx + rx {
+                if treasures.contains(&room) {
+                    if (x - cx).pow(2) + (y - cy).pow(2) <= 100 {
+                        map.cells[index(x, y)].ground = 0xe4;
+                    }
+                } else {
+                    map.cells[index(x, y)].ground = if rng.gen_bool(0.15) { 0xe2 } else { 0xe0 };
+                }
+            }
+        }
+    }
+    for &(a, b) in &links {
+        let (mut x, mut y) = center(a);
+        let (tx, ty) = center(b);
+        let horizontal = rng.gen_bool(0.5);
+        while (x, y) != (tx, ty) {
+            for dy in -1..=0 {
+                for dx in -1..=0 {
+                    map.cells[index(x + dx, y + dy)].ground = 0xe0;
+                }
+            }
+            if x != tx && (horizontal || y == ty) {
+                x += (tx - x).signum();
+            } else {
+                y += (ty - y).signum();
+            }
+        }
+    }
+    for &room in &rooms {
+        let (cx, cy) = footprints[room];
+        if room == 12 {
+            // Sandy tracks match selected Missing Tile, not a sinking moat: https://www.youtube.com/watch?v=Igu8lFDRHg0&t=20s (123.4.4 footage; this footprint remains reconstructed).
+            for y in cy - 18..=cy + 18 {
+                for x in cx - 18..=cx + 18 {
+                    let (dx, dy) = ((x - cx).abs(), (y - cy).abs());
+                    if (64..=169).contains(&(dx * dx + dy * dy)) {
+                        map.cells[index(x, y)].ground = MISSING_TILE;
+                    }
+                }
+            }
+            for (dx, dy) in [(-15, -13), (15, -13), (-15, 13), (15, 13)] {
+                for y in cy + dy - 1..=cy + dy + 1 {
+                    for x in cx + dx - 1..=cx + dx + 1 {
+                        if x != cx + dx || y != cy + dy {
+                            map.cells[index(x, y)].object = Some(WALL);
+                        }
+                        map.cells[index(x, y)].ground = 0xff;
+                    }
+                }
+            }
+            for (dx, dy) in [(-7, -7), (7, -7), (-7, 7), (7, 7)] {
+                put(&mut map, cx + dx, cy + dy, WALL)?;
+            }
+            put(&mut map, cx, cy, ANCHOR)?;
+            put(&mut map, cx, cy + 1, EXIT)?;
+            for (dx, dy, kind) in [
+                (-3, -2, STATUES[0]),
+                (-2, 4, STATUES[1]),
+                (4, 0, STATUES[2]),
+            ] {
+                put(&mut map, cx + dx, cy + dy, kind)?;
+            }
+            map.cells[index(cx, cy + 1)].region = 1;
+            continue;
+        }
+        if !treasures.contains(&room) {
+            // Keep the draw for ordinary rooms to prevent later actor/population drift.
+            let bend = rng.gen_range(0..7);
+            if events.contains(&room) || room % 7 == 0 {
+                for y in cy - 6..=cy + 6 {
+                    for x in cx - 6..=cx + 6 {
+                        if (x - cx + 2 * (y - cy) + bend).rem_euclid(13) < 3 {
+                            map.cells[index(x, y)].ground = MISSING_TILE;
+                        }
+                    }
+                }
+            }
+        }
+        if events.contains(&room) {
+            let treasure = treasures.contains(&room);
+            if !treasure {
+                for y in cy - 9..=cy + 9 {
+                    for x in cx - 9..=cx + 9 {
+                        map.cells[index(x, y)].ground = MISSING_TILE;
+                    }
+                }
+            }
+            put(
+                &mut map,
+                cx,
+                cy,
+                if treasure { TREASURE } else { SARCOPHAGUS },
+            )?;
+            if !treasure {
+                let count = rng.gen_range(8..=12);
+                for n in 0..count {
+                    let angle = n as f32 * TAU / count as f32;
+                    let radius = if n % 2 == 0 { 3. } else { 5. };
+                    put(
+                        &mut map,
+                        cx + (radius * angle.cos()).round() as i32,
+                        cy + (radius * angle.sin()).round() as i32,
+                        if n % 2 == 0 { 0xd2a } else { 0xd2b },
+                    )?;
+                }
+            }
+            continue;
+        }
+        let family = room % 7;
+        if family == 0 {
+            put(&mut map, cx, cy, SWITCH)?;
+            for (dx, dy) in [
+                (-4, -4),
+                (0, -5),
+                (4, -4),
+                (5, 0),
+                (4, 4),
+                (0, 5),
+                (-4, 4),
+                (-5, 0),
+            ] {
+                put(&mut map, cx + dx, cy + dy, TRAP)?;
+            }
+        } else {
+            let pack: &[u16] = match family {
+                1 => &[0xd11, 0xd13, 0xd15],
+                2 => &[0xd19, 0xd19],
+                3 => &[0xd3a, 0xd3b, 0xd3c],
+                4 => &[0xd1a, 0xd1a, 0xd1b],
+                5 => &[0xd31, 0xd32, 0xd33],
+                _ => &[0xd34, 0xd35, 0xd36],
+            };
+            for (n, kind) in pack.iter().enumerate() {
+                put(&mut map, cx - 3 + n as i32 * 3, cy, *kind)?;
+            }
+        }
+    }
+    for &(a, b) in &links {
+        let (ax, ay) = center(a);
+        let (bx, by) = center(b);
+        if ax == bx || ay == by {
+            let (x, y) = ((ax + bx) / 2, (ay + by) / 2);
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let c = &mut map.cells[index(x + dx, y + dy)];
+                    if c.ground != 0xff && c.object.is_none() {
+                        c.ground = QUICKSAND;
+                    }
+                }
+            }
+        }
+    }
+    apply_floor_pattern(&mut map, &rooms, &events, (seed % 7) as i32);
+    for y in 1..163 {
+        for x in 1..163 {
+            if map.cells[index(x, y)].ground == 0xff
+                && map.cells[index(x, y)].object.is_none()
+                && [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                    .into_iter()
+                    .any(|(x, y)| map.cells[index(x, y)].ground != 0xff)
+            {
+                map.cells[index(x, y)].object = Some(WALL);
+            }
+        }
+    }
+    // ConnectedWall.draw requires a valid shape before its first frame, including isolated pillars.
+    for y in 0..map.height {
+        for x in 0..map.width {
+            if map.cells[index(x, y)].object != Some(WALL) {
+                continue;
+            }
+            let mut connection = 0_u32;
+            for (nx, ny) in [(x, y - 1), (x + 1, y), (x, y + 1), (x - 1, y)] {
+                let joined = (0..map.width).contains(&nx)
+                    && (0..map.height).contains(&ny)
+                    && map.cells[index(nx, ny)].object == Some(WALL);
+                connection = (connection << 8) | if joined { 1 } else { 2 };
+            }
+            map.cells[index(x, y)].config = format!("conn:{connection}");
+        }
+    }
+    for c in &map.cells {
+        ensure!(
+            content.grounds.contains_key(&c.ground),
+            "unknown Tomb ground {:#x}",
+            c.ground
+        );
+        if let Some(kind) = c.object {
+            content.get(kind)?;
+        }
+    }
+    tracing::info!(
+        seed,
+        rooms = rooms.len(),
+        treasures = treasures.len(),
+        sarcophagi = map
+            .cells
+            .iter()
+            .filter(|c| c.object == Some(SARCOPHAGUS))
+            .count(),
+        "generated reconstructed Tomb layout"
+    );
+    Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeSet, VecDeque};
+
+    #[test]
+    fn footprint_offsets_replay_within_bounds_and_pin_all_protected_sites() {
+        for seed in (0..64).chain([u64::MAX]) {
+            for events in [vec![], vec![1, 4, 9, 15, 23]] {
+                let footprints = footprint_centers(seed, &events);
+                assert_eq!(footprints, footprint_centers(seed, &events));
+                for (room, &(x, y)) in footprints.iter().enumerate() {
+                    let (cx, cy) = center(room);
+                    assert!((x - cx).abs() <= 3 && (y - cy).abs() <= 3);
+                    if room == 12
+                        || [6, 7, 8, 11, 13, 16, 17, 18].contains(&room)
+                        || events.contains(&room)
+                        || room % 7 == 0
+                    {
+                        assert_eq!((x, y), (cx, cy), "seed {seed}, room {room}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_tile_field_keeps_signed_modulo_slope_period_and_width() {
+        for phase in 0..7 {
+            for y in -13..=13 {
+                for x in -26..=26 {
+                    assert_eq!(
+                        missing_tile_at(x, y, phase),
+                        missing_tile_at(x + 13, y, phase)
+                    );
+                    assert_eq!(
+                        missing_tile_at(x, y, phase),
+                        missing_tile_at(x + 2, y - 1, phase)
+                    );
+                }
+                assert_eq!(
+                    (-13..0).filter(|&x| missing_tile_at(x, y, phase)).count(),
+                    3
+                );
+            }
+            for (residue, expected) in [(0, true), (2, true), (3, false), (12, false)] {
+                assert_eq!(missing_tile_at(residue - phase - 13, 0, phase), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn floor_pattern_only_changes_eligible_ground_not_metadata() {
+        let grounds = [0xe0, 0xe2, 0xff, 0xe4, MISSING_TILE, QUICKSAND, 0xe1, 0xe0];
+        let mut map = Map {
+            width: grounds.len() as i32 * 13,
+            height: 1,
+            cells: vec![
+                Cell {
+                    ground: 0xff,
+                    object: Some(WALL),
+                    config: "conn:33686018".into(),
+                    terrain: 7,
+                    region: 0
+                };
+                grounds.len() * 13
+            ],
+            spawns: vec![(0.5, 0.5)],
+        };
+        for (n, ground) in grounds.into_iter().enumerate() {
+            map.cells[n * 13].ground = ground;
+        }
+        map.cells[7 * 13].region = 1;
+        let mut expected = map.clone();
+        expected.cells[0].ground = MISSING_TILE;
+        expected.cells[13].ground = MISSING_TILE;
+        apply_floor_pattern(&mut map, &[], &[], 0);
+        assert_eq!(
+            serde_json::to_value(map).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn floor_pattern_protects_closed_boss_event_and_switch_boxes() {
+        let rooms = [0, 1, 12];
+        for (room, extent) in [(12, 19), (1, 10), (0, 10)] {
+            let (cx, cy) = center(room);
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                for (distance, expected) in [(extent, 0xe0), (extent + 1, MISSING_TILE)] {
+                    let (x, y) = (cx + dx * distance, cy + dy * distance);
+                    let mut map = Map {
+                        width: 164,
+                        height: 164,
+                        cells: vec![
+                            Cell {
+                                ground: 0xe0,
+                                object: None,
+                                config: String::new(),
+                                terrain: 0,
+                                region: 0
+                            };
+                            164 * 164
+                        ],
+                        spawns: vec![],
+                    };
+                    apply_floor_pattern(&mut map, &rooms, &[1], (-x - 2 * y).rem_euclid(13));
+                    assert_eq!(
+                        map.cells[index(x, y)].ground,
+                        expected,
+                        "room {room}, coordinate ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn offset_ordinary_footprints_and_packs_share_one_global_floor_field() {
+        let content = Content::load(std::path::Path::new("data")).unwrap();
+        let rooms: Vec<_> = (0..25).filter(|r| ![7, 11, 13, 17].contains(r)).collect();
+        let (mut moved, mut asymmetric) = (0, 0);
+        for seed in (0..64).chain([u64::MAX]) {
+            let map = generate(&content, seed).unwrap();
+            let repeated = generate(&content, seed).unwrap();
+            assert_eq!(
+                serde_json::to_value(&map).unwrap(),
+                serde_json::to_value(&repeated).unwrap()
+            );
+            let events: Vec<_> = rooms
+                .iter()
+                .copied()
+                .filter(|&room| {
+                    let (x, y) = center(room);
+                    matches!(map.cells[index(x, y)].object, Some(SARCOPHAGUS | TREASURE))
+                })
+                .collect();
+            let footprints = footprint_centers(seed, &events);
+            let ordinary_rooms: Vec<_> = rooms
+                .iter()
+                .copied()
+                .filter(|r| *r != 12 && !events.contains(r) && r % 7 != 0)
+                .collect();
+            for &room in &ordinary_rooms {
+                let (cx, cy) = footprints[room];
+                let (sx, sy) = center(room);
+                moved += usize::from((cx, cy) != (sx, sy));
+                asymmetric += usize::from(cx - sx != cy - sy);
+                // These slices miss the fixed two-tile routes, exposing the actual room edges.
+                let xs: Vec<_> = (sx - 14..=sx + 14)
+                    .filter(|&x| map.cells[index(x, cy + 5)].ground != 0xff)
+                    .collect();
+                let ys: Vec<_> = (sy - 14..=sy + 14)
+                    .filter(|&y| map.cells[index(cx + 5, y)].ground != 0xff)
+                    .collect();
+                assert_eq!(xs.first().unwrap() + xs.last().unwrap(), 2 * cx);
+                assert_eq!(ys.first().unwrap() + ys.last().unwrap(), 2 * cy);
+                assert!((7..=10).contains(&(cx - xs[0])));
+                assert!((7..=10).contains(&(cy - ys[0])));
+                let pack: &[u16] = match room % 7 {
+                    1 => &[0xd11, 0xd13, 0xd15],
+                    2 => &[0xd19, 0xd19],
+                    3 => &[0xd3a, 0xd3b, 0xd3c],
+                    4 => &[0xd1a, 0xd1a, 0xd1b],
+                    5 => &[0xd31, 0xd32, 0xd33],
+                    _ => &[0xd34, 0xd35, 0xd36],
+                };
+                for (n, &kind) in pack.iter().enumerate() {
+                    assert_eq!(
+                        map.cells[index(cx - 3 + n as i32 * 3, cy)].object,
+                        Some(kind),
+                        "seed {seed}, room {room}, pack member {n}"
+                    );
+                }
+            }
+            let (mut ordinary, mut shoulders, mut corridors) = (0, 0, 0);
+            for y in 0..map.height {
+                for x in 0..map.width {
+                    if rooms.iter().any(|&room| {
+                        let (cx, cy) = center(room);
+                        let extent = if room == 12 {
+                            19
+                        } else if events.contains(&room) || room % 7 == 0 {
+                            10
+                        } else {
+                            return false;
+                        };
+                        (x - cx).abs() <= extent && (y - cy).abs() <= extent
+                    }) {
+                        continue;
+                    }
+                    let c = &map.cells[index(x, y)];
+                    if c.region != 0 || !matches!(c.ground, 0xe0 | 0xe2 | MISSING_TILE) {
+                        continue;
+                    }
+                    let in_box = |extent| {
+                        ordinary_rooms.iter().any(|&room| {
+                            let (cx, cy) = footprints[room];
+                            (x - cx).abs() <= extent && (y - cy).abs() <= extent
+                        })
+                    };
+                    ordinary += usize::from(in_box(6));
+                    shoulders += usize::from(c.ground == MISSING_TILE && in_box(10) && !in_box(6));
+                    corridors += usize::from(c.ground == MISSING_TILE && !in_box(10));
+                    assert_eq!(
+                        c.ground == MISSING_TILE,
+                        (x + 2 * y + (seed % 7) as i32).rem_euclid(13) < 3,
+                        "seed {seed}, coordinate ({x},{y}), ground {:#x}",
+                        c.ground
+                    );
+                }
+            }
+            assert!(
+                ordinary > 0 && shoulders > 0 && corridors > 0,
+                "seed {seed}: {ordinary} ordinary, {shoulders} shoulders, {corridors} corridors"
+            );
+        }
+        assert!(
+            moved > 0 && asymmetric > 0,
+            "{moved} moved, {asymmetric} asymmetric"
+        );
+    }
+
+    #[test]
+    fn footage_layout_keeps_selected_floors_hollow_pillars_and_connected_two_tile_passages() {
+        let content = Content::load(std::path::Path::new("data")).unwrap();
+        assert_eq!(content.grounds[&MISSING_TILE], 0.9);
+        assert_eq!(content.grounds[&QUICKSAND], 0.6);
+        for seed in (0..64).chain([u64::MAX]) {
+            let map = generate(&content, seed).unwrap();
+            assert_eq!(map.spawns, vec![(80.5, 81.5)]);
+            assert_eq!(map.cells[index(80, 81)].object, Some(EXIT));
+            assert_eq!(map.cells[index(80, 81)].region, 1);
+            let count = |kind| map.cells.iter().filter(|c| c.object == Some(kind)).count();
+            assert!((3..=5).contains(&count(SARCOPHAGUS)));
+            assert_eq!(count(TREASURE), 1);
+            assert_eq!(count(ANCHOR), 1);
+            assert_eq!(count(EXIT), 1);
+            for kind in STATUES {
+                assert_eq!(count(kind), 1);
+            }
+            assert_eq!(map.cells[index(80, 70)].ground, MISSING_TILE);
+            assert!(map.cells.iter().any(|c| c.ground == QUICKSAND));
+            for (dx, dy) in [(-15, -13), (15, -13), (-15, 13), (15, 13)] {
+                for y in -1..=1 {
+                    for x in -1..=1 {
+                        let c = &map.cells[index(80 + dx + x, 80 + dy + y)];
+                        assert_eq!(c.ground, 0xff);
+                        assert_eq!(c.object, (x != 0 || y != 0).then_some(WALL));
+                    }
+                }
+            }
+            for (i, c) in map.cells.iter().enumerate() {
+                let (x, y) = (i as i32 % map.width, i as i32 / map.width);
+                if c.ground != 0xff {
+                    assert!((3..=157).contains(&x) && (3..=157).contains(&y));
+                }
+                if c.object != Some(WALL) {
+                    continue;
+                }
+                let conn: u32 = c.config.strip_prefix("conn:").unwrap().parse().unwrap();
+                let expected = [(x, y - 1), (x + 1, y), (x, y + 1), (x - 1, y)].map(|(nx, ny)| {
+                    if map.cells[index(nx, ny)].object == Some(WALL) {
+                        1
+                    } else {
+                        2
+                    }
+                });
+                assert_eq!(conn.to_be_bytes(), expected, "seed {seed}, wall {x},{y}");
+            }
+            let passable = |x: i32, y: i32| {
+                (0..map.width).contains(&x) && (0..map.height).contains(&y) && {
+                    let c = &map.cells[index(x, y)];
+                    content.grounds[&c.ground] > 0. && c.object != Some(WALL)
+                }
+            };
+            let mut seen = BTreeSet::from([(80, 81)]);
+            let mut queue = VecDeque::from([(80, 81)]);
+            while let Some((x, y)) = queue.pop_front() {
+                for p in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                    if passable(p.0, p.1) && seen.insert(p) {
+                        queue.push_back(p);
+                    }
+                }
+            }
+            for (i, c) in map.cells.iter().enumerate() {
+                if c.object.is_some_and(|kind| kind != WALL) {
+                    assert!(
+                        seen.contains(&(i as i32 % map.width, i as i32 / map.width)),
+                        "seed {seed}, cell {i}"
+                    );
+                }
+                if c.object == Some(SARCOPHAGUS) {
+                    assert_eq!(c.ground, MISSING_TILE, "seed {seed}, Sarcophagus cell {i}");
+                }
+                let binding = match c.object {
+                    Some(0xd2a | 0xd2b) => Some((SARCOPHAGUS, 10)),
+                    Some(TRAP) => Some((SWITCH, 6)),
+                    _ => None,
+                };
+                if let Some((owner, radius)) = binding {
+                    let (x, y) = (i as i32 % map.width, i as i32 / map.width);
+                    let owners = map
+                        .cells
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, c)| {
+                            let (ox, oy) = (*j as i32 % map.width, *j as i32 / map.width);
+                            c.object == Some(owner)
+                                && (x - ox).pow(2) + (y - oy).pow(2) < radius * radius
+                        })
+                        .count();
+                    assert_eq!(owners, 1, "seed {seed}, bound actor cell {i}");
+                }
+            }
+            let mut passages = 0;
+            for room in (0..25).filter(|r| ![7, 11, 12, 13, 17].contains(r)) {
+                let (cx, cy) = center(room);
+                if room % 5 < 4 && passable(cx + 16, cy) {
+                    assert_eq!((-3..=3).filter(|dy| passable(cx + 16, cy + dy)).count(), 2);
+                    passages += 1;
+                }
+                if room / 5 < 4 && passable(cx, cy + 16) {
+                    assert_eq!((-3..=3).filter(|dx| passable(cx + dx, cy + 16)).count(), 2);
+                    passages += 1;
+                }
+            }
+            assert!(passages > 0);
+        }
+    }
+}

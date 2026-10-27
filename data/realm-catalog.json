@@ -1,0 +1,35 @@
+[
+  {
+    "kind": "baseline",
+    "id": "realm-fsod-1",
+    "path": "realm-fsod-1.wmap",
+    "sha256": "4db1a0c911142a81679dcc9a29d44306d84954405db7086e18deb1e87ab0538d"
+  },
+  {
+    "kind": "baseline",
+    "id": "realm-fsod-2",
+    "path": "realm-fsod-2.wmap",
+    "sha256": "deae4f49a4e9b1b405c08f7157bb542540c59ddf0abb9b24d47c741da3ef4c74"
+  },
+  {
+    "kind": "baseline",
+    "id": "realm-fsod-3",
+    "path": "realm-fsod-3.wmap",
+    "sha256": "6f0bf7856b085184d81256abd9e3844fbaab8555980dfa639578a44a970a0a27"
+  },
+  {
+    "kind": "reconstruction",
+    "recipe": "world02.json",
+    "sha256": "cdb1e71fc882c2d1e70af983223fe4c678a435e2e932082613f9467351ad9604"
+  },
+  {
+    "kind": "reconstruction",
+    "recipe": "world03.json",
+    "sha256": "7e05f1f010e28014c8f726e17937c62538aa0f5d82074329118c34972e192ebd"
+  },
+  {
+    "kind": "reconstruction",
+    "recipe": "world01.json",
+    "sha256": "3f4127c3d096af0caf4667603aa4b3b87025ada5509451ef3265447e3497edc9"
+  }
+]
