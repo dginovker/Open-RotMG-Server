@@ -1285,8 +1285,8 @@ impl Directory {
                     .any(|(_, name, _, _)| *name == template);
             if template == "realm-shore" {
                 let started = Instant::now();
-                let groves = source.as_ref().context("Realm source missing")?.groves()?;
-                world.populate_authored_groves(&groves)?;
+                let sites = source.as_ref().context("Realm source missing")?.sites()?;
+                world.populate_authored_sites(&sites)?;
                 // No period numeric rarity survives; keep this a rare inland encounter, not modern fixed Reef spawns.
                 let beach_bum = world.rng.gen_ratio(1, 200);
                 world.populate_tomb_entry()?;
@@ -1295,7 +1295,7 @@ impl Directory {
                     world.populate_beach_bum()?;
                 }
                 world.populate_realm_heroes()?;
-                world.populate_named_quests(!groves.is_empty())?;
+                world.populate_named_quests(&sites)?;
                 world.populate_realm_events()?;
                 world.populate_hermit()?;
                 world.populate_manor_entry()?;
