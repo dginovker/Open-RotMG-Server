@@ -30,8 +30,8 @@ async function click(x,y) {
   const r=await c.eval('(()=>{const r=document.querySelector("ruffle-player").getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height};})()');
   assert.equal(r.width,800);assert.equal(r.height,600);
   const p={x:r.x+x,y:r.y+y,button:'left',clickCount:1};
-  await c.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:p.x,y:p.y});
-  try{await c.call('Input.dispatchMouseEvent',{type:'mousePressed',buttons:1,...p});}
+  await c.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:p.x,y:p.y});await delay(60);
+  try{await c.call('Input.dispatchMouseEvent',{type:'mousePressed',buttons:1,...p});await delay(60);}
   finally{await c.call('Input.dispatchMouseEvent',{type:'mouseReleased',buttons:0,...p});}
   await delay(150);
 }
@@ -53,11 +53,12 @@ function image(row) {
   const pixels=inflateSync(Buffer.concat(compressed));
   assert.equal(pixels.length,(width*4+1)*height);
   for(let y=0;y<height;y++)assert.equal(pixels[y*(width*4+1)],0,'Selected PNG encoder changed its row filter');
-  return {width,height,pixel:(x,y)=>[...pixels.subarray(y*(width*4+1)+1+x*4,y*(width*4+1)+5+x*4)]};
+  let opaque=0;for(let y=0;y<height;y++)for(let x=0;x<width;x++)if(pixels[y*(width*4+1)+4+x*4])opaque++;
+  return {width,height,opaque,pixel:(x,y)=>[...pixels.subarray(y*(width*4+1)+1+x*4,y*(width*4+1)+5+x*4)]};
 }
 const replies=op=>traffic.filter(t=>t.path==='/legacy-api/picture/'+op);
 async function save(name,kind=2,tags='qa,editor',fixedType=false) {
-  await click(45,294);
+  await click(30,288);
   await type(380,175,name);await type(380,307,tags);
   if(!fixedType){await click(430,245);await click(430,245+kind*44);}
   const count=replies('save').length;
@@ -71,7 +72,7 @@ async function save(name,kind=2,tags='qa,editor',fixedType=false) {
 }
 async function loadFirst() {
   const count=replies('get').length;
-  await click(45,263);
+  await click(30,258);
   await until(()=>replies('get').length>count,'Mine gallery thumbnail');await delay(500);
   await click(140,180);await delay(500);
 }
@@ -81,26 +82,29 @@ async function navigate(url) {
   await until(()=>c.eval('document.querySelector("ruffle-player")?.ruffle().isPlaying===true'),'playing client');
   await c.eval('(()=>{const m=document.querySelector("ruffle-player").shadowRoot.querySelector("#hardware-acceleration-modal");if(m&&!m.classList.contains("hidden"))m.querySelector(".close-modal").click();})()');
   await delay(1500);
+  await c.eval('document.querySelector("ruffle-player").focus()');await click(700,60);
 }
 export async function enter({account}) {
   owner=account;const origin=await c.eval('location.origin');
   await navigate(origin+'/draw.html');await shot('editor-before');
-  await click(45,294);const count=replies('save').length;await click(520,456);
+  await click(30,288);const count=replies('save').length;await click(520,456);
   assert.equal(replies('save').length,count,'Empty native name reached the server');await shot('empty-name-refused');
   await type(380,175,'Editor934');await click(520,456);
   assert.equal(replies('save').length,count,'Missing native type reached the server');await shot('missing-type-refused');
   await click(380,456);
   await click(55,490);await click(132,122);
   let row=await save('Editor934');const id=row[0];
-  assert.deepEqual(image(row).pixel(0,0),[0,0,0,255]);
-  await click(45,83);await click(132,122);row=await save('Editor934');assert.equal(row[0],id);assert.equal(image(row).pixel(0,0)[3],0);
-  await click(45,143);row=await save('Editor934');assert.deepEqual(image(row).pixel(0,0),[0,0,0,255]);
-  await click(45,173);row=await save('Editor934');assert.equal(image(row).pixel(0,0)[3],0);
-  await click(45,143);await click(83,490);await click(45,113);await click(132,122);await click(45,54);await click(177,122);
+  assert.deepEqual(image(row).pixel(0,0),[0,0,0,255]);assert.equal(image(row).opaque,1);
+  await click(30,78);await click(132,122);row=await save('Editor934');assert.equal(row[0],id);assert.equal(image(row).pixel(0,0)[3],0);
+  await click(30,138);row=await save('Editor934');assert.deepEqual(image(row).pixel(0,0),[0,0,0,255]);
+  await click(30,168);row=await save('Editor934');assert.equal(image(row).pixel(0,0)[3],0);
+  await click(30,138);await click(83,490);await click(30,108);await click(132,122);await click(30,48);await click(177,122);
   row=await save('Editor934');assert.deepEqual(image(row).pixel(1,0),[0,0,0,255]);
-  await click(45,203);row=await save('Editor934');assert.equal(image(row).pixel(0,0)[3],0);assert.equal(image(row).pixel(1,0)[3],0);
-  await click(45,143);row=await save('Editor934');assert.deepEqual(image(row).pixel(1,0),[0,0,0,255]);
+  await click(30,198);row=await save('Editor934');assert.equal(image(row).opaque,0);
+  await click(30,138);row=await save('Editor934');assert.deepEqual(image(row).pixel(1,0),[0,0,0,255]);
+  assert.equal(image(row).opaque,2);
   const persisted=row[5];await shot('tools-roundtrip');
+  for(let i=0;i<3;i++)await click(772,112);await shot('preview-zoom');
   await navigate(origin+'/draw.html');await loadFirst();
   row=await save('Editor934');assert.equal(row[0],id);assert.equal(row[5],persisted,'Reload changed the saved bitmap');await shot('reconnected-art');
   await delay(61000);
