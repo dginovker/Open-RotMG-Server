@@ -31,8 +31,8 @@ async function click(x,y) {
   assert.equal(r.width,800);assert.equal(r.height,600);
   const p={x:r.x+x,y:r.y+y,button:'left',clickCount:1};
   await c.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:p.x,y:p.y});await delay(60);
-  try{await c.call('Input.dispatchMouseEvent',{type:'mousePressed',buttons:1,...p});await delay(60);}
-  finally{await c.call('Input.dispatchMouseEvent',{type:'mouseReleased',buttons:0,...p});}
+  try{await c.call('Input.dispatchMouseEvent',{type:'mousePressed',...p});await delay(60);}
+  finally{await c.call('Input.dispatchMouseEvent',{type:'mouseReleased',...p});}
   await delay(150);
 }
 async function type(x,y,text) {
@@ -117,7 +117,7 @@ export async function enter({account}) {
       const paint=async(x,frameWidth=w)=>{const cell=Math.min(Math.floor(360/frameWidth),Math.floor(360/h));await click(110+(360-cell*frameWidth)/2+cell*(x+.5),100+(360-cell*h)/2+cell*.5);};
       await click(55,490);await paint(0);
       if(mode===1) {
-        for(const [tab,x] of [[1,210],[2,263],[3,321],[4,387]]){await click(x,82);await paint(tab===4?2*w-1:tab,tab===4?2*w:w);}
+        for(const [tab,x] of [[1,225],[2,290],[3,355],[4,420]]){await click(x,82);await paint(tab===4?2*w-1:tab,tab===4?2*w:w);}
       }
       row=await save('Size'+mode+' '+w+' '+h,kind,'qa,size',mode!==0);
       const png=image(row);assert.equal(png.width,mode===1?7*w:w);assert.equal(png.height,h);assert.deepEqual(png.pixel(0,0),[0,0,0,255]);
