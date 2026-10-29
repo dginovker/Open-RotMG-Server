@@ -12,7 +12,11 @@ const out=process.env.QA_RESULTS_DIR,exec=promisify(execFile),traffic=[],pending
 let c,networkError,owner,menus=0;
 export async function beforeNavigate({browser}) {
   c=await connect({...browser,url:'about:blank',helper:join(process.env.PI_BROWSER_TOOLS,'direct-cdp.mjs'),onEvent:e=>{
-    if(e.method==='Network.requestWillBeSent'&&/\/legacy-api\/(picture\/|char\/list)/.test(e.params.request.url))pending.set(e.params.requestId,new URL(e.params.request.url).pathname);
+    if(e.method==='Network.requestWillBeSent'&&/\/legacy-api\/(picture\/|char\/list)/.test(e.params.request.url)){
+      const path=new URL(e.params.request.url).pathname;pending.set(e.params.requestId,path);
+      if(path.includes('/picture/'))console.error(JSON.stringify({event:'picture-request',path,id:e.params.requestId,contentType:Object.entries(e.params.request.headers).find(([k])=>k.toLowerCase()==='content-type')?.[1],bodyBytes:e.params.request.postData===undefined?null:Buffer.byteLength(e.params.request.postData)}));
+    }
+    if(e.method==='Network.loadingFailed'&&pending.has(e.params.requestId))console.error(JSON.stringify({event:'picture-transport-failed',path:pending.get(e.params.requestId),error:e.params.errorText,canceled:e.params.canceled}));
     if(e.method==='Network.loadingFinished'&&pending.has(e.params.requestId)) {
       const path=pending.get(e.params.requestId);pending.delete(e.params.requestId);
       if(path.endsWith('/char/list')){menus++;return;}
@@ -26,13 +30,24 @@ async function until(predicate,label) {
   for(let i=0;i<300;i++){if(networkError)throw networkError;if(await predicate())return;await delay(100);}
   throw Error('Native art editor did not reach '+label);
 }
+async function dismissNotice() {
+  if(await c.eval('(()=>{const p=document.querySelector("ruffle-player"),m=p.shadowRoot.querySelector("#hardware-acceleration-modal");if(!m||m.classList.contains("hidden"))return false;m.querySelector(".close-modal").click();p.focus({preventScroll:true});return true;})()')){
+    console.error('Dismissed the native Ruffle hardware-acceleration notice');await delay(150);
+  }
+}
 async function click(x,y) {
+  await dismissNotice();
   const r=await c.eval('(()=>{const r=document.querySelector("ruffle-player").getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height};})()');
   assert.equal(r.width,800);assert.equal(r.height,600);
   const p={x:r.x+x,y:r.y+y,button:'left',clickCount:1};
-  await c.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:p.x,y:p.y});await delay(60);
-  try{await c.call('Input.dispatchMouseEvent',{type:'mousePressed',...p});await delay(60);}
+  await c.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:p.x,y:p.y});await delay(1000);
+  try{await c.call('Input.dispatchMouseEvent',{type:'mousePressed',...p});await delay(100);}
   finally{await c.call('Input.dispatchMouseEvent',{type:'mouseReleased',...p});}
+  await delay(150);
+}
+async function key(key,code,windowsVirtualKeyCode) {
+  await dismissNotice();
+  for(const type of ['keyDown','keyUp'])await c.call('Input.dispatchKeyEvent',{type,key,code,windowsVirtualKeyCode});
   await delay(150);
 }
 async function type(x,y,text) {
@@ -72,22 +87,21 @@ async function save(name,kind=2,tags='qa,editor',fixedType=false) {
 }
 async function loadFirst() {
   const count=replies('get').length;
-  await click(30,258);
+  await key('l','KeyL',76);
   await until(()=>replies('get').length>count,'Mine gallery thumbnail');await delay(500);
-  await click(140,180);await delay(500);
+  await click(135,132);await delay(500);await shot('loaded-gallery-art');
 }
 async function navigate(url) {
   const count=menus;await c.call('Page.navigate',{url});
   await until(()=>menus>count,'account menu');
   await until(()=>c.eval('document.querySelector("ruffle-player")?.ruffle().isPlaying===true'),'playing client');
-  await c.eval('(()=>{const m=document.querySelector("ruffle-player").shadowRoot.querySelector("#hardware-acceleration-modal");if(m&&!m.classList.contains("hidden"))m.querySelector(".close-modal").click();})()');
-  await delay(1500);
+  await dismissNotice();await delay(1500);
   await c.eval('document.querySelector("ruffle-player").focus()');await click(700,60);
 }
 export async function enter({account}) {
   owner=account;const origin=await c.eval('location.origin');
   await navigate(origin+'/draw.html');await shot('editor-before');
-  await click(30,288);const count=replies('save').length;await click(520,456);
+  await key('s','KeyS',83);await type(380,175,'');const count=replies('save').length;await click(520,456);
   assert.equal(replies('save').length,count,'Empty native name reached the server');await shot('empty-name-refused');
   await type(380,175,'Editor934');await click(520,456);
   assert.equal(replies('save').length,count,'Missing native type reached the server');await shot('missing-type-refused');
@@ -107,7 +121,6 @@ export async function enter({account}) {
   for(let i=0;i<3;i++)await click(772,112);await shot('preview-zoom');
   await navigate(origin+'/draw.html');await loadFirst();
   row=await save('Editor934');assert.equal(row[0],id);assert.equal(row[5],persisted,'Reload changed the saved bitmap');await shot('reconnected-art');
-  await delay(61000);
   const sizes=[[8,8],[16,8],[16,16]];
   for(const [mode,dimensions,kind] of [[0,sizes,2],[1,sizes,1],[2,[[4,4],[5,5],[9,9],[10,10]],5]]) {
     await navigate(origin+'/draw.html');
@@ -125,6 +138,7 @@ export async function enter({account}) {
         // The selected editor packs five states into seven widths, not seven frames: 123.5.1 §_-qD§/§_-XK§, https://openrotmg.org/restoration/reference-data/client-123.5.1.swf
         for(const x of [w+1,2*w+2,4*w+3,7*w-1])assert.deepEqual(png.pixel(x,0),[0,0,0,255]);
         assert.equal(png.pixel(3*w,0)[3],0);
+        if(i===0){for(let n=0;n<3;n++)await click(772,112);for(const [name,x] of [['stand',598],['walk',635],['attack',672]]){await click(x,440);await delay(250);await shot('preview-'+name);}}
       }
       await shot('size-'+mode+'-'+w+'-'+h);
     }
