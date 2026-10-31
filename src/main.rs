@@ -8,6 +8,7 @@ mod crypto;
 mod dungeon;
 mod encounter;
 mod endgame;
+mod lag_log;
 mod loot;
 mod navigation;
 mod performance;
@@ -47,12 +48,24 @@ async fn serve(args: Vec<String>) -> Result<()> {
     let started = std::time::Instant::now();
     let filter = match std::env::var("RUST_LOG") {
         Ok(v) => tracing_subscriber::EnvFilter::try_new(v)?,
-        Err(std::env::VarError::NotPresent) => tracing_subscriber::EnvFilter::new("openrotmg=info"),
+        Err(std::env::VarError::NotPresent) => {
+            tracing_subscriber::EnvFilter::new("openrotmg=info,lag=info")
+        }
         Err(e) => return Err(e.into()),
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .json()
+    use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+    // Lag records also go to a capped file because journald drops messages under load.
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(|| lag_log::Writer)
+                .with_filter(
+                    tracing_subscriber::filter::Targets::new()
+                        .with_target("lag", tracing::Level::INFO),
+                ),
+        )
         .init();
     supervision::install_panic_hook();
     let (config, dev_control) = config::Config::load(&args)?;
@@ -66,6 +79,9 @@ async fn serve(args: Vec<String>) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     }
+    let lag = lag_log::open(&state)?;
+    lag_log::observe_host(state.clone())?;
+    tracing::info!(directory=%lag.display(), "lag log opened");
     validate_client_assets(&client)?;
     ensure!(
         client.join("client.swf").is_file(),

@@ -44,7 +44,7 @@ pub(super) fn start(slot: &Arc<Slot>, execution: Execution) -> Result<()> {
                                 let (counter,miss)=crate::performance::tick_miss(lateness,step,wait);
                                 let mut performance=world.performance.borrow_mut();
                                 performance.count(counter,1);
-                                tracing::warn!(world=id,tick=world.tick,miss=%miss,phases=%performance.slowest_phases(),"tick deadline missed");
+                                tracing::warn!(target:"lag",world=id,tick=world.tick,miss=%miss,phases=%performance.slowest_phases(),"tick deadline missed");
                             }
                             world.report_performance(id);
                         }

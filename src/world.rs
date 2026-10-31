@@ -7566,6 +7566,26 @@ impl World {
                 incremental_terrain_tiles=self.players.values().map(|p|p.view_tiles.borrow().incremental_tiles).sum::<u64>(),
                 cloned_snapshot_tiles=self.players.values().map(|p|p.view_tiles.borrow().cloned_snapshot_tiles).sum::<u64>(),
                 timings=%timings,"world performance");
+            let (humans, bots) = (
+                self.players
+                    .values()
+                    .filter(|p| p.controller == Controller::Human)
+                    .count(),
+                self.players
+                    .values()
+                    .filter(|p| p.controller == Controller::Autonomous)
+                    .count(),
+            );
+            if humans + bots > 0 {
+                let pick = |group: &str, phase: &str| {
+                    let t = &timings[group][phase];
+                    serde_json::json!({"count":t["count"],"p95_us":t["p95_us"],"max_us":t["max_us"]})
+                };
+                let summary = serde_json::json!({"step_hz":timings["achieved_step_hz"],"lateness_over_50ms":timings["missed_tick_deadlines"],
+                    "missed_by_cause":timings["counters"].as_object().map(|c|c.iter().filter(|(k,_)|k.starts_with("missed_")).collect::<serde_json::Map<_,_>>()),
+                    "step_wall":pick("timings","step"),"step_cpu":pick("thread_cpu","step"),"cpu_wait":pick("timings","cpu_wait"),"lateness":pick("timings","scheduling_lateness")});
+                tracing::info!(target:"lag",world_id,world=%self.name,humans,bots,entities=self.entities.len(),summary=%summary,"world tick summary");
+            }
         }
     }
 }
