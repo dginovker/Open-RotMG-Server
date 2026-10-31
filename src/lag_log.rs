@@ -208,7 +208,7 @@ fn snapshot(
                 .collect::<BTreeMap<_, _>>()
         });
     Ok(
-        json!({"window_seconds": seconds, "free_disk_bytes": stat.f_bavail as u64 * stat.f_frsize as u64,
+        json!({"window_seconds": seconds, "free_disk_bytes": stat.f_bavail * stat.f_frsize,
         "pressure_some_share": pressure, "game_cores": game_cpu, "game_threads": threads,
         "other_processes": others.iter().take(3).map(|(t, n)| json!({"name": n, "cores": cores(*t)})).collect::<Vec<_>>(),
         "load_average": std::fs::read_to_string("/proc/loadavg")?.split_whitespace().take(3).collect::<Vec<_>>()}),
