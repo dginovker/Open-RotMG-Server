@@ -357,19 +357,23 @@ pub struct ConnectionDiagnostics {
     native_ticks_sent: u64,
     last_native_tick_send: Option<Instant>,
     max_native_tick_send_gap: Option<(std::time::Duration, u64)>,
+    native_tick_stalls: u64,
 }
+pub(super) const UPDATE_STALL: std::time::Duration = std::time::Duration::from_millis(250);
 impl ConnectionDiagnostics {
     // Fast writes do not rule out long pauses between them (#1250).
-    pub fn queued_packet_sent(&mut self, packet: u8, now: Instant) {
+    pub fn queued_packet_sent(&mut self, packet: u8, now: Instant) -> Option<std::time::Duration> {
         self.last_socket_send = Some(now);
-        if packet == 62 {
-            self.native_ticks_sent += 1;
-            if let Some(previous) = self.last_native_tick_send.replace(now) {
-                self.max_native_tick_send_gap = self
-                    .max_native_tick_send_gap
-                    .max(Some((now.duration_since(previous), unix_ms())));
-            }
+        if packet != 62 {
+            return None;
         }
+        self.native_ticks_sent += 1;
+        let gap = now.duration_since(self.last_native_tick_send.replace(now)?);
+        self.max_native_tick_send_gap = self.max_native_tick_send_gap.max(Some((gap, unix_ms())));
+        (gap > UPDATE_STALL).then(|| {
+            self.native_tick_stalls += 1;
+            gap
+        })
     }
     pub fn handled(&mut self, sample: CommandSample) {
         let queue_ms = sample.queued.as_secs_f64() * 1000.;
@@ -462,7 +466,7 @@ impl ConnectionDiagnostics {
             "pending_ping_ages_ms": self.pending.values().map(|t| t.elapsed().as_millis()).collect::<Vec<_>>(),
             "expired_pings_session": self.expired_pings, "unmatched_pongs_session": self.unmatched_pongs,
             "game_commands_in_session": self.packets_in, "queued_packets_out_session": self.packets_out,
-            "native_ticks_sent_session":self.native_ticks_sent,
+            "native_ticks_sent_session":self.native_ticks_sent,"native_tick_stalls_session":self.native_tick_stalls,
             "max_native_tick_send_gap_ms_session":self.max_native_tick_send_gap.map(|(gap,_)|gap.as_secs_f64()*1000.),
             "max_native_tick_send_gap_end_unix_ms":self.max_native_tick_send_gap.map(|(_,at)|at),
             "max_socket_send_ms_session": self.max_send_ms, "max_handler_ms_session": self.max_handler_ms, "max_input_queue_ms_session": self.max_input_queue_ms,
@@ -625,7 +629,7 @@ fn public_diagnostics(report: &Value) -> Value {
             "slowest_handler":command_observation(&connection["slowest_handler"]),"slowest_input_queue":command_observation(&connection["slowest_input_queue"]),
             "last_move_received_age_ms":connection["last_move_received_age_ms"],"last_processed_packet":connection["last_processed_packet"],"last_processed_age_ms":connection["last_processed_age_ms"],
             "last_queued_packet_send_age_ms":connection["last_queued_packet_send_age_ms"],"last_pong_age_ms":connection["last_pong_age_ms"],
-            "native_ticks_sent":connection["native_ticks_sent_session"].as_u64(),
+            "native_ticks_sent":connection["native_ticks_sent_session"].as_u64(),"native_tick_stalls":connection["native_tick_stalls_session"].as_u64(),
             "max_native_tick_send_gap_ms":connection["max_native_tick_send_gap_ms_session"].as_f64(),
             "max_native_tick_send_gap_end_unix_ms":connection["max_native_tick_send_gap_end_unix_ms"].as_u64(),
             "max_socket_send_ms": connection["max_socket_send_ms_session"], "max_handler_ms": connection["max_handler_ms_session"],
@@ -1132,13 +1136,19 @@ mod native_lag_tests {
         let mut connection = ConnectionDiagnostics::default();
         let start = Instant::now() - std::time::Duration::from_secs(5);
         assert!(connection.snapshot()["max_native_tick_send_gap_ms_session"].is_null());
-        connection.queued_packet_sent(62, start);
+        assert_eq!(connection.queued_packet_sent(62, start), None);
         assert!(connection.snapshot()["max_native_tick_send_gap_ms_session"].is_null());
         connection.queued_packet_sent(wire::PING, start + std::time::Duration::from_secs(2));
-        connection.queued_packet_sent(62, start + std::time::Duration::from_secs(3));
+        let stall = connection.queued_packet_sent(62, start + std::time::Duration::from_secs(3));
+        assert_eq!(stall, Some(std::time::Duration::from_secs(3)));
+        let ms = std::time::Duration::from_millis;
+        let on_time =
+            connection.queued_packet_sent(62, start + std::time::Duration::from_secs(3) + ms(100));
+        assert_eq!(on_time, None);
         connection.queued_packet_sent(62, start + std::time::Duration::from_secs(4));
         let snapshot = connection.snapshot();
-        assert_eq!(snapshot["native_ticks_sent_session"], 3);
+        assert_eq!(snapshot["native_ticks_sent_session"], 4);
+        assert_eq!(snapshot["native_tick_stalls_session"], 2);
         assert_eq!(
             snapshot["max_native_tick_send_gap_ms_session"].as_f64(),
             Some(3000.)
@@ -1153,7 +1163,8 @@ mod native_lag_tests {
             Some(start + std::time::Duration::from_secs(4))
         );
         let public = public_diagnostics(&json!({"connection":snapshot}));
-        assert_eq!(public["connection"]["native_ticks_sent"], 3);
+        assert_eq!(public["connection"]["native_ticks_sent"], 4);
+        assert_eq!(public["connection"]["native_tick_stalls"], 2);
         assert_eq!(
             public["connection"]["max_native_tick_send_gap_ms"].as_f64(),
             Some(3000.)

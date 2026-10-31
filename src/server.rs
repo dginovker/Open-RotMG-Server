@@ -2538,7 +2538,9 @@ async fn connection_io<S, I>(
                     let sending = std::time::Instant::now();
                     if send!(Message::Binary(frame.into())).is_err(){break 'connection;}
                     session.diagnostics.packets_out += 1;
-                    session.diagnostics.queued_packet_sent(id,std::time::Instant::now());
+                    if let Some(gap)=session.diagnostics.queued_packet_sent(id,std::time::Instant::now()) {
+                        tracing::warn!(player=session.player,world=session.diagnostics.world,gap_ms=gap.as_secs_f64()*1000.,"player update stall");
+                    }
                     session.diagnostics.max_send_ms = session.diagnostics.max_send_ms.max(sending.elapsed().as_secs_f64()*1000.0);
                     // Ruffle can discard unread TCP bytes when the proxy closes before its next frame.
                     if reconnect {reconnect_sent=true;deadline.as_mut().reset(tokio::time::Instant::now()+std::time::Duration::from_secs(10));break;}
