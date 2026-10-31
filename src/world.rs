@@ -7582,7 +7582,7 @@ impl World {
                     serde_json::json!({"count":t["count"],"p95_us":t["p95_us"],"max_us":t["max_us"]})
                 };
                 let summary = serde_json::json!({"step_hz":timings["achieved_step_hz"],"lateness_over_50ms":timings["missed_tick_deadlines"],
-                    "missed_by_cause":timings["counters"].as_object().map(|c|c.iter().filter(|(k,_)|k.starts_with("missed_")).collect::<serde_json::Map<_,_>>()),
+                    "missed_by_cause":timings["counters"].as_object().map(|c|c.iter().filter(|(k,_)|k.starts_with("missed_")).map(|(k,v)|(k.clone(),v.clone())).collect::<serde_json::Map<_,_>>()),
                     "step_wall":pick("timings","step"),"step_cpu":pick("thread_cpu","step"),"cpu_wait":pick("timings","cpu_wait"),"lateness":pick("timings","scheduling_lateness")});
                 tracing::info!(target:"lag",world_id,world=%self.name,humans,bots,entities=self.entities.len(),summary=%summary,"world tick summary");
             }
