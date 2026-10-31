@@ -7496,36 +7496,43 @@ impl World {
                     continue;
                 }
                 let p = &self.players[&id];
-                let dynamic: Vec<_> = p
-                    .known
-                    .iter()
-                    .filter(|entity| {
-                        self.players.contains_key(entity)
-                            || self.companions.contains(entity)
-                            || self.entities.get(entity).is_some_and(|e| {
-                                e.hp > 0
-                                    || !e.items.is_empty()
-                                    || matches!(
-                                        self.content.objects[&e.kind].class.as_str(),
-                                        "Portal" | "Merchant"
-                                    )
-                            })
-                    })
-                    .copied()
-                    .collect();
-                let mut o = Writer::new();
-                o.i32(p.tick).i32(tick_ms).i16(dynamic.len() as i16);
-                for entity in dynamic {
-                    let status = self.stats(entity, id).expect("visible entity must exist");
-                    o.0.extend(
-                        self.players
-                            .get_mut(&id)
-                            .unwrap()
-                            .tick_stats
-                            .encode(entity, status),
-                    );
+                if p.tx.is_some()
+                    || p.spectators.as_ref().is_some_and(|s| s.receiver_count() > 0)
+                {
+                    let dynamic: Vec<_> = p
+                        .known
+                        .iter()
+                        .filter(|entity| {
+                            self.players.contains_key(entity)
+                                || self.companions.contains(entity)
+                                || self.entities.get(entity).is_some_and(|e| {
+                                    e.hp > 0
+                                        || !e.items.is_empty()
+                                        || matches!(
+                                            self.content.objects[&e.kind].class.as_str(),
+                                            "Portal" | "Merchant"
+                                        )
+                                })
+                        })
+                        .copied()
+                        .collect();
+                    let mut o = Writer::new();
+                    o.i32(p.tick).i32(tick_ms).i16(dynamic.len() as i16);
+                    for entity in dynamic {
+                        let status = self.stats(entity, id).expect("visible entity must exist");
+                        o.0.extend(
+                            self.players
+                                .get_mut(&id)
+                                .unwrap()
+                                .tick_stats
+                                .encode(entity, status),
+                        );
+                    }
+                    send(&self.players[&id], wire::NEW_TICK, o.0);
+                } else {
+                    // Unwatched bots discard their ticks; the first watched tick must then carry every stat.
+                    self.players.get_mut(&id).unwrap().tick_stats.forget();
                 }
-                send(&self.players[&id], wire::NEW_TICK, o.0);
                 let p = self.players.get_mut(&id).unwrap();
                 let dex = p
                     .effective(&self.content, self.now)
