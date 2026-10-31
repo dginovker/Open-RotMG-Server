@@ -37,6 +37,7 @@ jobs:
           python3 -B -W error::ResourceWarning -m unittest discover -s scripts -p 'test_cargo*.py'
           python3 -B -W error::ResourceWarning -m unittest discover -s scripts -p test_run.py
           python3 -B -W error::ResourceWarning -m unittest discover -s scripts -p test_profile.py
+          python3 -B -W error::ResourceWarning -m unittest discover -s scripts -p test_lag_report.py
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked -- --test-threads=2
