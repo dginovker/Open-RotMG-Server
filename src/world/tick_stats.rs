@@ -58,6 +58,9 @@ impl Cache {
         }
         out
     }
+    pub fn forget(&mut self) {
+        self.statuses.clear();
+    }
     pub fn retain(&mut self, known: &BTreeSet<i32>) {
         self.statuses.retain(|id, _| known.contains(id));
     }

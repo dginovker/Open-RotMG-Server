@@ -408,3 +408,45 @@ impl Projection {
         }))
     }
 }
+
+#[cfg(test)]
+#[test]
+fn unwatched_bot_ticks_are_not_encoded_and_the_first_watched_tick_is_complete() {
+    let (mut world, id) = super::movement_tests::fixture(0x18, false);
+    world.players.get_mut(&id).unwrap().controller = Controller::Autonomous;
+    world.updates(id, true).unwrap();
+    for _ in 0..6 {
+        world.step();
+    }
+    assert_eq!(world.players[&id].tick_stats.elided, 0, "unwatched tick was encoded");
+    let mut attachment = world.attach_spectator(id, 1).unwrap();
+    let ticks: Vec<_> = (0..4)
+        .flat_map(|_| {
+            world.step();
+            std::iter::from_fn(|| attachment.receiver.try_recv().ok()).collect::<Vec<_>>()
+        })
+        .filter(|packet| packet.id == wire::NEW_TICK)
+        .collect();
+    assert!(!ticks.is_empty(), "watched bot received no NEW_TICK");
+    let mut r = Reader::new(&ticks[0].body);
+    r.i32().unwrap();
+    r.i32().unwrap();
+    let mut own = None;
+    for _ in 0..r.i16().unwrap() {
+        let start = r.remaining();
+        let entity = r.i32().unwrap();
+        r.take(8).unwrap();
+        for _ in 0..r.i16().unwrap() {
+            if matches!(r.u8().unwrap(), 31 | 62) {
+                r.utf().unwrap();
+            } else {
+                r.i32().unwrap();
+            }
+        }
+        if entity == id {
+            own = Some(start[..start.len() - r.remaining().len()].to_vec());
+        }
+    }
+    r.done().unwrap();
+    assert_eq!(own.unwrap(), world.stats(id, id).unwrap(), "first watched tick omitted stats");
+}
