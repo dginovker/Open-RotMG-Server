@@ -51,9 +51,9 @@ export async function run(game){
     })();
     const settled=await Promise.allSettled([action,tracking]);for(const r of settled)if(r.status==='rejected')throw r.reason;
     }
-    await tracked([group(2300,true,target.id)]);
+    await tracked(Array.from({length:2},()=>group(3000,true,target.id)));
     const primedParty=await save('primed'),primed=primedParty[0].inspected.diagnostic.entities.find(e=>e.id===target.id);
-    assert(primed?.stage===0&&primed.hp<8000,'Ordinary primer must damage the same priest without triggering retreat');
+    assert(primed?.stage===0&&primed.hp>2400&&primed.hp<=6000,'Ordinary primer must leave the same priest in stage0 with2400<HP<=6000');
     assert(primedParty[2].inspected.view.character.mp<normal[2].inspected.view.character.mp&&samples.some(s=>s.view.character.hp>=normal[0].inspected.view.character.hp+50),'Ordinary ranged Tome must spend mana and restore observed Knight health');
     assert(primedParty.every(s=>s.observed.lifecycle.alive&&s.inspected.view.character.hp>300),'Party health abort before sustained fire');
     await tracked(Array.from({length:3},()=>group(3000,true,target.id)),{name:'tomb-worshipper-black-phase',when:v=>Boolean(latest&&[1,2].includes(latest.stage)&&v.lifecycle.alive&&v.game_ms>=latest.time)});
