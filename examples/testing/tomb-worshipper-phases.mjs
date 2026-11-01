@@ -3,7 +3,7 @@ import {readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 
-export const fixture={class:0x300,level:20,seed:12351,world:'tomb-of-the-ancients',worldSeed:12,position:{x:143.4,y:113.1},equipment:[0xc0a,0xae1,0xaf9,0xacd],backpack:Array(8).fill(-1),stats:[720,252,50,25,75,75,40,50]};
+export const fixture={class:0x300,level:20,seed:12351,world:'tomb-of-the-ancients',worldSeed:12,position:{x:144.5,y:112.5},equipment:[0xc0a,0xae1,0xaf9,0xacd],backpack:Array(8).fill(-1),stats:[720,252,50,25,75,75,40,50]};
 export async function run(game){
   const out=process.env.QA_RESULTS_DIR,snapshots=[],samples=[],casts=[];let target,latest,player;
   const save=async label=>{const s={label,observed:await game.observe(),inspected:await game.inspect()};snapshots.push(s);return s;};
@@ -30,7 +30,8 @@ export async function run(game){
     const before=await save('prepared');player=before.inspected.diagnostic.player;
     assert(before.observed.world==='Tomb of the Ancients'&&before.observed.lifecycle.alive,'Fresh living Tomb actor required');
     assert(!before.inspected.diagnostic.entities.some(e=>e.kind===0xd1a),'Mummy encounters are outside this component scope');
-    await game.act({keys:[' '],duration_ms:1800},{name:'tomb-worshipper-normal',when:v=>v.lifecycle.alive&&v.game_ms>=1500});
+    // The opening volley is already in flight before cloak acceptance; cross its old aim lines.
+    await game.act([{actor:game.actor,input:{keys:['w',' '],duration_ms:100}},{actor:game.actor,input:{keys:['a'],duration_ms:100}},{actor:game.actor,input:{keys:[],duration_ms:1600}}],{name:'tomb-worshipper-normal',when:v=>v.lifecycle.alive&&v.game_ms>=1500});
     const normal=await save('normal');safe(normal);
     assert(normal.inspected.view.character.mp<before.inspected.view.character.mp&&(normal.inspected.view.character.conditions&4096)!==0,'Ordinary cloak must spend mana and apply Invisible, not protection');
     const sarc=normal.inspected.diagnostic.entities.find(e=>e.kind===0xd29&&Math.hypot(e.pos.x-144.5,e.pos.y-112.5)<0.1);assert(sarc,'Original Sarcophagus missing');
