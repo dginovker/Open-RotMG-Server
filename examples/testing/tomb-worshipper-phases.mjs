@@ -10,13 +10,14 @@ export async function run(game){
   const peers=[game,await game.join({...spec,world:start.session.world,position:{x:144.3,y:112.9}}),await game.join({...spec,class:0x310,world:start.session.world,position:{x:144.2,y:112.8},equipment:[0xaf6,0xc1e,0xb05,0xac8],stats:[670,385,50,25,50,50,40,75]})];
   const snapshots=[],samples=[],pointers=[];let connection,latest;
   const save=async label=>{const actors=await Promise.all(peers.map(async g=>({actor:g.actor,observed:await g.observe(),inspected:await g.inspect()})));snapshots.push({label,actors});return actors;};
-  const group=(ms,heal,fire)=>peers.map((g,n)=>({actor:g.actor,input:{keys:n===2&&heal?[' ']:[],duration_ms:ms,...(n===0&&fire?{target:{entity:fire,camera_angle:-Math.PI/4,fire:true}}:{})}}));
+  const group=(ms,heal,fire)=>peers.map((g,n)=>({actor:g.actor,input:{keys:n===2&&heal?[' ']:[],duration_ms:n===0?ms:100,...(n===0&&fire?{target:{entity:fire,camera_angle:-Math.PI/4,fire:true}}:{})}}));
   try{
     const before=await save('prepared');
     assert(before.every(s=>s.observed.world==='Tomb of the Ancients'&&s.observed.lifecycle.alive),'Fresh living Tomb party required');
     assert(!before[0].inspected.diagnostic.entities.some(e=>e.kind===0xd1a),'Mummy encounters are outside this component scope');
     await game.act([group(2000,true)],{name:'tomb-worshipper-normal',when:v=>v.lifecycle.alive&&v.game_ms>=1500});
     const normal=await save('normal'),state=normal[0].inspected;
+    assert(normal[2].inspected.view.character.mp<before[2].inspected.view.character.mp&&(normal[2].inspected.view.character.conditions&(1<<25))!==0,'Ordinary Tome must spend mana and apply selected Armored');
     const sarc=state.diagnostic.entities.find(e=>e.kind===0xd29&&Math.hypot(e.pos.x-144.5,e.pos.y-112.5)<0.1);assert(sarc,'Original prepared Sarcophagus missing');
     const guards=state.diagnostic.entities.filter(e=>[0xd2a,0xd2b].includes(e.kind)&&e.tomb?.anchor===sarc.id);
     assert(guards.length===8&&guards.every(e=>e.hp===(e.kind===0xd2a?8000:7000)),'Eight undamaged original worshippers required');
@@ -26,8 +27,9 @@ export async function run(game){
     connection=await connect({...browser,url:config.origin+'/',helper:config.browserTools});
     const rect=await connection.eval('(()=>{const r=document.querySelector("ruffle-player").getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height};})()');assert(rect.width===800&&rect.height===600,'Native player must be unscaled');
     async function sample(){const frame=await game.inspect(),entity=frame.diagnostic.entities.find(e=>e.id===target.id);assert(entity,'Original worshipper disappeared');latest={time:frame.view.time_ms,stage:entity.stage};samples.push(frame);return{frame,entity};}
+    async function tracked(inputs,capture){
     let active=true;
-    const action=game.act(Array.from({length:3},()=>group(4000,true,target.id)),{name:'tomb-worshipper-black-retreat',when:v=>Boolean(latest&&[1,2].includes(latest.stage)&&v.lifecycle.alive&&v.game_ms>=latest.time)}).finally(()=>active=false);
+    const action=game.act(inputs,capture).finally(()=>active=false);
     const tracking=(async()=>{
       for(let i=0;active&&(await game.observe()).paused;i++){assert(i<250,'Native party did not unpause');await delay(20);}
       let previous;
@@ -45,6 +47,12 @@ export async function run(game){
       }
     })();
     const settled=await Promise.allSettled([action,tracking]);for(const r of settled)if(r.status==='rejected')throw r.reason;
+    }
+    await tracked([group(1500,false,target.id)]);
+    const primedParty=await save('primed'),primed=primedParty[0].inspected.diagnostic.entities.find(e=>e.id===target.id);
+    assert(primed?.stage===0&&primed.hp<8000,'Ordinary primer must damage the same priest without triggering retreat');
+    assert(primedParty.every(s=>s.observed.lifecycle.alive&&s.inspected.view.character.hp>300),'Party health abort before sustained fire');
+    await tracked(Array.from({length:3},()=>group(3000,true,target.id)),{name:'tomb-worshipper-black-phase',when:v=>Boolean(latest&&[1,2].includes(latest.stage)&&v.lifecycle.alive&&v.game_ms>=latest.time)});
     await save('after-fire');
     for(let n=0;n<6;n++){
       const {entity}=await sample();if(entity.stage===3)break;
