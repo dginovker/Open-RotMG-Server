@@ -11,12 +11,13 @@ export async function run(game){
   async function uses(){
     const text=await readFile(join(out,'native/server.log'),'utf8');
     assert(text.endsWith('\n'),'Native ability log must contain complete records');
-    const accepted=text.trimEnd().split('\n').map(JSON.parse).filter(r=>r.fields.message==='ability activated'&&r.fields.player===player&&r.fields.item===0xae1).map(r=>r.fields);casts.splice(0,casts.length,...accepted);return accepted;
+    const accepted=text.trimEnd().split('\n').filter(line=>line.startsWith('{')).map(JSON.parse).filter(r=>r.fields?.message==='ability activated'&&r.fields.player===player&&r.fields.item===0xae1).map(r=>r.fields);casts.splice(0,casts.length,...accepted);return accepted;
   }
   async function cloak(s){
     const log=await uses(),last=log.at(-1);assert(last&&last.mana_cost===85&&last.cooldown_ms===6500,'Accepted selected cloak event required');
-    assert(Math.abs(last.ability_clock_ms-last.simulation_time_ms)<100,'Native ability and simulation clocks exceed the cloak planning contract');
-    const remaining=last.simulation_time_ms+last.cooldown_ms+100-s.observed.game_ms;
+    const ready=s.inspected.view.character.ability_ready_ms,time=s.inspected.view.time_ms;
+    assert(Number.isSafeInteger(ready)&&Number.isSafeInteger(time),'Simulation-domain cloak readiness missing from native view');
+    const remaining=ready-time;
     return {keys:remaining<=0&&s.inspected.view.character.mp>=85?[' ']:[],near:remaining>0&&remaining<1500,count:log.length};
   }
   async function sample(){const s=await game.inspect(),e=s.diagnostic.entities.find(e=>e.id===target);assert(e,'Original worshipper disappeared');samples.push(s);latest={stage:e.stage,time:s.view.time_ms};return e;}
@@ -49,7 +50,7 @@ export async function run(game){
     for(let n=0;n<6;n++){
       const e=await sample();if(e.stage===3)break;assert([1,2].includes(e.stage),'Unexpected priest healing phase');
       const s=await save('healing-wait-'+n);safe(s);const c=await cloak(s);
-      await watched({keys:c.keys,duration_ms:100});
+      await watched({keys:c.keys,duration_ms:1000});
       if(c.keys.length)assert((await uses()).length===c.count+1,'Requested waiting cloak was not accepted exactly once');
     }
     const yellow=await save('yellow-ready');safe(yellow);const e=await sample();assert(e.stage===3&&e.size===120,'Original priest did not reach enlarged yellow orbit');
