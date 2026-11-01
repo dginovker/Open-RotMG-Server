@@ -2,77 +2,63 @@ import assert from 'node:assert/strict';
 import {readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {connect} from '../../scripts/record-demo.mjs';
 
-export const fixture={class:0x31e,level:20,seed:12351,world:'tomb-of-the-ancients',worldSeed:12,position:{x:143.4,y:113.1},equipment:[0xb0b,0xb22,0xafc,0xac8],backpack:Array(8).fill(-1),stats:[770,252,50,40,50,50,75,50]};
+export const fixture={class:0x300,level:20,seed:12351,world:'tomb-of-the-ancients',worldSeed:12,position:{x:143.4,y:113.1},equipment:[0xc0a,0xae1,0xaf9,0xacd],backpack:Array(8).fill(-1),stats:[720,252,50,25,75,75,40,50]};
 export async function run(game){
-  const out=process.env.QA_RESULTS_DIR,{worldSeed,...spec}=fixture,start=await game.observe();
-  const peers=[game,await game.join({...spec,world:start.session.world,position:{x:143.6,y:113.1}}),await game.join({...spec,class:0x310,world:start.session.world,position:{x:150.4,y:113.4},equipment:[0xaf6,0xb25,0xb05,0xac8],stats:[670,385,50,25,50,50,40,75]})];
-  const snapshots=[],samples=[],pointers=[];let connection,latest;
-  const save=async label=>{const actors=await Promise.all(peers.map(async g=>({actor:g.actor,observed:await g.observe(),inspected:await g.inspect()})));snapshots.push({label,actors});return actors;};
-  const group=(ms,heal,fire)=>peers.map((g,n)=>({actor:g.actor,input:{keys:n===2&&heal?[' ']:[],duration_ms:n===0?ms:100,...(n===0&&fire?{target:{entity:fire,camera_angle:-Math.PI/4,fire:true}}:{})}}));
+  const out=process.env.QA_RESULTS_DIR,snapshots=[],samples=[],casts=[];let target,latest,player;
+  const save=async label=>{const s={label,observed:await game.observe(),inspected:await game.inspect()};snapshots.push(s);return s;};
+  const safe=s=>assert(s.observed.lifecycle.alive&&s.inspected.view.character.hp>300&&s.observed.game_ms<26000,'Living health-above300 and exposure-below26000 required');
+  async function uses(){
+    const text=await readFile(join(out,'native/server.log'),'utf8');
+    assert(text.endsWith('\n'),'Native ability log must contain complete records');
+    const accepted=text.trimEnd().split('\n').map(JSON.parse).filter(r=>r.fields.message==='ability activated'&&r.fields.player===player&&r.fields.item===0xae1).map(r=>r.fields);casts.splice(0,casts.length,...accepted);return accepted;
+  }
+  async function cloak(s){
+    const log=await uses(),last=log.at(-1);assert(last&&last.mana_cost===85&&last.cooldown_ms===6500,'Accepted selected cloak event required');
+    assert(Math.abs(last.ability_clock_ms-last.simulation_time_ms)<100,'Native ability and simulation clocks exceed the cloak planning contract');
+    const remaining=last.simulation_time_ms+last.cooldown_ms+100-s.observed.game_ms;
+    return {keys:remaining<=0&&s.inspected.view.character.mp>=85?[' ']:[],near:remaining>0&&remaining<1500,count:log.length};
+  }
+  async function sample(){const s=await game.inspect(),e=s.diagnostic.entities.find(e=>e.id===target);assert(e,'Original worshipper disappeared');samples.push(s);latest={stage:e.stage,time:s.view.time_ms};return e;}
+  async function watched(input,capture){
+    let active=true;const action=game.act(input,capture).finally(()=>active=false);
+    const observing=(async()=>{for(let n=0;active&&(await game.observe()).paused;n++){assert(n<250,'Native actor did not unpause');await delay(20);}while(active){await sample();await delay(80);}})();
+    const results=await Promise.allSettled([action,observing]);for(const r of results)if(r.status==='rejected')throw r.reason;
+  }
   try{
-    const before=await save('prepared');
-    assert(before.every(s=>s.observed.world==='Tomb of the Ancients'&&s.observed.lifecycle.alive),'Fresh living Tomb party required');
-    assert(before.every(s=>!s.inspected.diagnostic.entities.some(e=>e.kind===0xd1a)),'Mummy encounters are outside this component scope');
-    const caster=before[2].inspected.view.position;
-    assert(before.slice(0,2).every(s=>Math.hypot(s.inspected.view.position.x-caster.x,s.inspected.view.position.y-caster.y)<8),'Both Knights must start within the selected Tome range');
-    await game.act([group(2000,false)],{name:'tomb-worshipper-normal',when:v=>v.lifecycle.alive&&v.game_ms>=1500});
-    const normal=await save('normal'),state=normal[0].inspected;
-    assert((normal[0].inspected.view.character.conditions&4)!==0,'Ordinary incoming Weak required before bounded sword observation');
-    const sarc=state.diagnostic.entities.find(e=>e.kind===0xd29&&Math.hypot(e.pos.x-144.5,e.pos.y-112.5)<0.1);assert(sarc,'Original prepared Sarcophagus missing');
-    const guards=state.diagnostic.entities.filter(e=>[0xd2a,0xd2b].includes(e.kind)&&e.tomb?.anchor===sarc.id);
+    const before=await save('prepared');player=before.inspected.diagnostic.player;
+    assert(before.observed.world==='Tomb of the Ancients'&&before.observed.lifecycle.alive,'Fresh living Tomb actor required');
+    assert(!before.inspected.diagnostic.entities.some(e=>e.kind===0xd1a),'Mummy encounters are outside this component scope');
+    await game.act({keys:[' '],duration_ms:1800},{name:'tomb-worshipper-normal',when:v=>v.lifecycle.alive&&v.game_ms>=1500});
+    const normal=await save('normal');safe(normal);
+    assert(normal.inspected.view.character.mp<before.inspected.view.character.mp&&(normal.inspected.view.character.conditions&4096)!==0,'Ordinary cloak must spend mana and apply Invisible, not protection');
+    const sarc=normal.inspected.diagnostic.entities.find(e=>e.kind===0xd29&&Math.hypot(e.pos.x-144.5,e.pos.y-112.5)<0.1);assert(sarc,'Original Sarcophagus missing');
+    const guards=normal.inspected.diagnostic.entities.filter(e=>[0xd2a,0xd2b].includes(e.kind)&&e.tomb?.anchor===sarc.id);
     assert(guards.length===8&&guards.every(e=>e.hp===(e.kind===0xd2a?8000:7000)),'Eight undamaged original worshippers required');
-    const target=guards.filter(e=>e.kind===0xd2a).sort((a,b)=>Math.hypot(a.pos.x-state.view.position.x,a.pos.y-state.view.position.y)-Math.hypot(b.pos.x-state.view.position.x,b.pos.y-state.view.position.y))[0];assert(target,'Original male worshipper missing');
-    assert(normal.every(s=>s.inspected.view.character.hp>300),'Party health insufficient for the bounded exposure');
-    const config=JSON.parse(await readFile(join(out,'native/native.json'),'utf8')),browser=config.native.find(n=>n.actor===game.actor);assert(browser,'Owned lead browser missing');
-    connection=await connect({...browser,url:config.origin+'/',helper:config.browserTools});
-    const rect=await connection.eval('(()=>{const r=document.querySelector("ruffle-player").getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height};})()');assert(rect.width===800&&rect.height===600,'Native player must be unscaled');
-    async function sample(){const frame=await game.inspect(),entity=frame.diagnostic.entities.find(e=>e.id===target.id);assert(entity,'Original worshipper disappeared');latest={time:frame.view.time_ms,stage:entity.stage};samples.push(frame);return{frame,entity};}
-    async function tracked(inputs,capture){
-    let active=true;
-    const action=game.act(inputs,capture).finally(()=>active=false);
-    const tracking=(async()=>{
-      for(let i=0;active&&(await game.observe()).paused;i++){assert(i<250,'Native party did not unpause');await delay(20);}
-      let previous;
-      while(active){
-        const {frame}=await sample();if(!active)break;
-        const body=frame.view.objects.find(e=>e.id===target.id&&e.hp>0);assert(body,'Original worshipper left the native neighborhood');
-        if(previous&&frame.view.time_ms>previous.time){
-          const dt=(frame.view.time_ms-previous.time)/1000,vx=(body.position.x-previous.pos.x)/dt,vy=(body.position.y-previous.pos.y)/dt;
-          // Native shot traces used aim sampled100–150ms earlier, in addition to projectile flight.
-          const t=0.15+Math.min(0.35,Math.hypot(body.position.x-frame.view.position.x,body.position.y-frame.view.position.y)/10),dx=body.position.x+vx*t-frame.view.position.x,dy=body.position.y+vy*t-frame.view.position.y,a=-Math.PI/4;
-          const x=50*(dx*Math.cos(a)+dy*Math.sin(a)),y=50*(-dx*Math.sin(a)+dy*Math.cos(a)),scale=Math.max(1,Math.hypot(x,y)/270),mouse={x:rect.x+300+x/scale,y:rect.y+325+y/scale};
-          assert(Number.isFinite(mouse.x)&&Number.isFinite(mouse.y),'Nonfinite native aim');
-          await connection.call('Input.dispatchMouseEvent',{type:'mouseMoved',buttons:1,...mouse});pointers.push({time:frame.view.time_ms,target:body.position,mouse});
-        }
-        previous={time:frame.view.time_ms,pos:body.position};await delay(80);
-      }
-    })();
-    const settled=await Promise.allSettled([action,tracking]);for(const r of settled)if(r.status==='rejected')throw r.reason;
+    target=guards.filter(e=>e.kind===0xd2a).sort((a,b)=>Math.hypot(a.pos.x-normal.inspected.view.position.x,a.pos.y-normal.inspected.view.position.y)-Math.hypot(b.pos.x-normal.inspected.view.position.x,b.pos.y-normal.inspected.view.position.y))[0]?.id;assert(target,'Original male worshipper missing');
+    for(let n=0;n<16;n++){
+      const s=await save('damage-ready-'+n);safe(s);const e=await sample();if([1,2].includes(e.stage))break;
+      assert(e.stage===0,'Original priest passed the black phase before capture');
+      const c=await cloak(s),count=c.near?1:4;
+      const sequence=Array.from({length:count},(_,i)=>({actor:game.actor,input:{keys:i===0&&c.keys.length?c.keys:c.near?[n%2?'a':'d']:[],duration_ms:c.near?100:250,target:{entity:target,camera_angle:-Math.PI/4,fire:true}}}));
+      await watched(sequence);
+      if(c.keys.length)assert((await uses()).length===c.count+1,'Requested cloak was not accepted exactly once');
     }
-    await tracked(Array.from({length:2},()=>group(3000,true,target.id)));
-    const primedParty=await save('primed'),primed=primedParty[0].inspected.diagnostic.entities.find(e=>e.id===target.id);
-    assert(primed?.stage===0&&primed.hp>2400&&primed.hp<=6000,'Ordinary primer must leave the same priest in stage0 with2400<HP<=6000');
-    assert(primedParty[2].inspected.view.character.mp<normal[2].inspected.view.character.mp&&samples.some(s=>s.view.character.hp>=normal[0].inspected.view.character.hp+50),'Ordinary ranged Tome must spend mana and restore observed Knight health');
-    assert(primedParty.every(s=>s.observed.lifecycle.alive&&s.inspected.view.character.hp>300),'Party health abort before sustained fire');
-    await tracked(Array.from({length:3},()=>group(3000,true,target.id)),{name:'tomb-worshipper-black-phase',when:v=>Boolean(latest&&[1,2].includes(latest.stage)&&v.lifecycle.alive&&v.game_ms>=latest.time)});
-    await save('after-fire');
+    const black=await save('black-ready');safe(black);assert([1,2].includes((await sample()).stage),'Bounded ordinary fire did not reach the black phase');
+    await watched({keys:[],duration_ms:100},{name:'tomb-worshipper-black-phase',when:v=>Boolean(latest&&[1,2].includes(latest.stage)&&v.lifecycle.alive&&v.game_ms>=latest.time)});
     for(let n=0;n<6;n++){
-      const {entity}=await sample();if(entity.stage===3)break;
-      const party=await save('healing-wait-'+n);assert(party.every(s=>s.observed.lifecycle.alive&&s.inspected.view.character.hp>300),'Party health abort before another exposure');
-      assert(party[0].observed.game_ms<26000,'Worshipper transition exposure exhausted');
-      await game.act([group(1000,party[2].inspected.view.character.mp>=85)]);
+      const e=await sample();if(e.stage===3)break;assert([1,2].includes(e.stage),'Unexpected priest healing phase');
+      const s=await save('healing-wait-'+n);safe(s);const c=await cloak(s);
+      await watched({keys:c.keys,duration_ms:100});
+      if(c.keys.length)assert((await uses()).length===c.count+1,'Requested waiting cloak was not accepted exactly once');
     }
-    const {entity}=await sample();assert(entity.stage===3,'Original worshipper did not reach its yellow enlarged orbit');
-    const party=await save('yellow-ready');assert(party.every(s=>s.observed.lifecycle.alive&&s.inspected.view.character.hp>300),'Party health abort before capture');
-    await game.act([group(1000,party[2].inspected.view.character.mp>=85)],{name:'tomb-worshipper-yellow-orbit',when:v=>v.lifecycle.alive});
-    await save('yellow');
-    await game.act([peers.map(g=>({actor:g.actor,input:{keys:['Insert'],duration_ms:300}}))]);
-    const escaped=await save('escaped'),stages=samples.map(s=>s.diagnostic.entities.find(e=>e.id===target.id));
-    game.check('ordinary sword damage triggers the original priest retreat',stages.some(e=>e.stage===1&&e.hp<2400)&&escaped[0].inspected.diagnostic.character.shots>0);
-    game.check('same priest naturally heals to full health then enlarges',stages.some(e=>e.stage===2&&e.hp===8000)&&stages.some(e=>e.stage===3&&e.size===120));
-    game.check('prepared Sarcophagus survives without awakening bosses',snapshots.filter(s=>s.label!=='escaped').every(s=>s.actors[0].inspected.diagnostic.entities.some(e=>e.id===sarc.id&&e.hp>0)&&!s.actors[0].inspected.diagnostic.entities.some(e=>[0xd26,0xd27,0xd28].includes(e.kind))));
-    game.check('same three living characters escape without kills or Tomb credit',escaped.every((s,n)=>s.observed.world==='Nexus'&&s.observed.lifecycle.alive&&s.observed.session.character===before[n].observed.session.character&&s.inspected.diagnostic.character.kills===0&&s.inspected.diagnostic.character.tombs===0));
-  }finally{connection?.close();await writeFile(join(out,'worshipper-phases.json'),JSON.stringify({qualification:'Prepared component test, two legal max-stat Knights plus one Priest with a supplied remote caster and ordinary selected300HealNova/range8/85MP Tome. No NPC/HP/RNG edits, injected protection, support bots, refill or relocation. One sword fires under the native lease with recorded owned-page pointer tracking; input holds are not total exposure. Current reconstruction phases, not historical heal-rate/AI/full-dungeon acceptance.',snapshots,samples,pointers},null,2));}
+    const yellow=await save('yellow-ready');safe(yellow);const e=await sample();assert(e.stage===3&&e.size===120,'Original priest did not reach enlarged yellow orbit');
+    await watched({keys:[],duration_ms:100},{name:'tomb-worshipper-yellow-orbit',when:v=>v.lifecycle.alive});
+    await save('yellow');await game.act({keys:['Insert'],duration_ms:300});
+    const escaped=await save('escaped'),stages=samples.map(s=>s.diagnostic.entities.find(e=>e.id===target));
+    game.check('ordinary dagger damage triggers original priest retreat',stages.some(e=>e.stage===1&&e.hp<2400)&&escaped.inspected.diagnostic.character.shots>0);
+    game.check('same priest naturally heals to full then enlarges',stages.some(e=>e.stage===2&&e.hp===8000)&&stages.some(e=>e.stage===3&&e.size===120));
+    game.check('original Sarcophagus survives without awakening bosses',snapshots.filter(s=>s.label!=='escaped').every(s=>s.inspected.diagnostic.entities.some(e=>e.id===sarc.id&&e.hp>0)&&!s.inspected.diagnostic.entities.some(e=>[0xd26,0xd27,0xd28].includes(e.kind))));
+    game.check('same living character escapes without kills or Tomb credit',escaped.observed.world==='Nexus'&&escaped.observed.lifecycle.alive&&escaped.observed.session.character===before.observed.session.character&&escaped.inspected.diagnostic.character.kills===0&&escaped.inspected.diagnostic.character.tombs===0);
+  }finally{await writeFile(join(out,'worshipper-phases.json'),JSON.stringify({qualification:'Prepared single-native-client component. Selected legal Rogue base720HP plus140HP ring, ordinary dagger/cloak and bounded WASD cooldown sidesteps. Invisibility is not protection. All input uses existing SDK; observer sends no CDP input. No NPC/HP/RNG edits, bots, refill, teleport or adoption. Input holds are not total exposure. Current reconstruction phases, not historical healing-rate/AI/full-dungeon acceptance.',snapshots,samples,casts},null,2));}
 }
