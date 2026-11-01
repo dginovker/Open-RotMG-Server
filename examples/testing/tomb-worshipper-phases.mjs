@@ -48,7 +48,7 @@ export async function run(game){
     })();
     const settled=await Promise.allSettled([action,tracking]);for(const r of settled)if(r.status==='rejected')throw r.reason;
     }
-    await tracked([group(1500,false,target.id)]);
+    await tracked([group(2000,false,target.id)]);
     const primedParty=await save('primed'),primed=primedParty[0].inspected.diagnostic.entities.find(e=>e.id===target.id);
     assert(primed?.stage===0&&primed.hp<8000,'Ordinary primer must damage the same priest without triggering retreat');
     assert(primedParty.every(s=>s.observed.lifecycle.alive&&s.inspected.view.character.hp>300),'Party health abort before sustained fire');
