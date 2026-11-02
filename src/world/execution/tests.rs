@@ -156,3 +156,42 @@ async fn cpu_panic_keeps_world_context_and_unblocks_directory() {
     assert_eq!(context["npc"], serde_json::json!([42, 0x615]));
     assert!(incident.location.unwrap().contains("execution/tests.rs"));
 }
+
+#[tokio::test]
+async fn realm_retirement_rejects_queued_mailbox_and_cached_world_handle() {
+    let mut d = directory();
+    d.grow_realm_for_test();
+    d.clock.set_paused(true);
+    let handle = super::super::Handle::spawn(d);
+    let cached = handle.in_world(1);
+    let ran = Arc::new(AtomicBool::new(false));
+    let marked = ran.clone();
+    let (entered, ready) = oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let owner = handle.clone();
+    let transaction = tokio::spawn(async move {
+        owner
+            .directory(move |d| {
+                d.realm_allocation_step();
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+                d.tick += 6000;
+                d.realm_allocation_step();
+                assert!(!d.worlds.contains_key(&1));
+                Ok(())
+            })
+            .await
+    });
+    ready.await.unwrap();
+    let mut queued = Box::pin(cached.call(move |_| {
+        marked.store(true, Ordering::Release);
+        Ok(())
+    }));
+    assert!(futures_util::poll!(queued.as_mut()).is_pending());
+    release.send(()).unwrap();
+    transaction.await.unwrap().unwrap();
+    assert!(queued.await.is_err());
+    assert!(!ran.load(Ordering::Acquire));
+    assert!(cached.call(|w| Ok(w.tick)).await.is_err());
+    handle.supervisor.ensure_running().unwrap();
+}

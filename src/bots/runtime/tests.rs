@@ -79,7 +79,7 @@ async fn drain_waits_for_accepted_bot_reentry_after_source_save() {
         .directory(move |d| {
             let world = d.worlds.get_mut(&-2).unwrap();
             world.players.get_mut(&id).unwrap().character.lifetime.tiles += 1;
-            let (time, key, _) = d.issue(account, character, 1)?;
+            let (time, key, _) = d.issue(account, character, -3)?;
             let reservation = d.reserve_transfer(key.clone())?;
             Ok((time, key, reservation))
         })
@@ -110,7 +110,7 @@ async fn drain_waits_for_accepted_bot_reentry_after_source_save() {
                 &mut owner,
                 _entry,
                 Reentry::Portal {
-                    destination: 1,
+                    destination: -3,
                     time,
                     key,
                     session: crate::world::view::Session {
