@@ -15,7 +15,7 @@ pub(super) struct RealmDirectory {
     empty_since: BTreeMap<i32, u64>,
 }
 enum Preparation {
-    Replacement(RealmPreparation),
+    Replacement(Box<RealmPreparation>),
     Demand(allocation::DemandPreparation),
 }
 struct RealmPreparation {
@@ -643,14 +643,14 @@ impl Directory {
                 }
             };
             // One unpublished build preserves Realm selection/publication order without occupying simulation workers.
-            self.endgame.preparing = Some(Preparation::Replacement(RealmPreparation {
+            self.endgame.preparing = Some(Preparation::Replacement(Box::new(RealmPreparation {
                 origin,
                 castle: castle_id,
                 realm: realm_id,
                 rng_before,
                 realm_started,
                 result,
-            }));
+            })));
             self.next_world = next;
         }
         let Some(Preparation::Replacement(preparation)) = self.endgame.preparing.as_mut() else {
