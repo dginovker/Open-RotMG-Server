@@ -62,11 +62,9 @@ impl Directory {
             .copied()
             .filter(|id| *id > 0)
             .collect();
-        let mut retired = false;
         for id in candidates.into_iter().rev() {
             let r = &self.endgame.realms[&id];
-            let eligible = !retired
-                && self.lineage_count() > 1
+            let eligible = self.lineage_count() > 1
                 && r.enabled
                 && r.cycle.admits()
                 && r.replacement.is_none()
@@ -93,7 +91,7 @@ impl Directory {
                 // The guard loans the actual World, not just its last actor snapshot.
                 if self.realm_dependencies_clear(id) {
                     self.remove_empty_realm(id);
-                    retired = true;
+                    break;
                 }
             }
         }
@@ -606,5 +604,25 @@ mod tests {
                 .contains("worker stopped")
         );
         assert!(d.endgame.preparing.is_none());
+    }
+    #[test]
+    fn realm_retirement_newest_first_preserves_other_completed_dwell() {
+        let mut d = directory(72);
+        d.realm_limit = 3;
+        d.grow_realm_for_test();
+        let realm = d.make("realm-shore", "Realm", false, None).unwrap();
+        let heroes = realm.hero_identities();
+        d.worlds.insert(2, realm);
+        d.bind_realm_heroes(2, heroes).unwrap();
+        let portal = d.install_realm_portal(2, None).unwrap();
+        d.endgame.realms.get_mut(&2).unwrap().portal = Some(portal);
+        d.realm_allocation_step();
+        d.tick = 6000;
+        d.realm_allocation_step();
+        assert!(!d.worlds.contains_key(&2));
+        assert!(d.worlds.contains_key(&1));
+        d.realm_allocation_step();
+        assert!(!d.worlds.contains_key(&1));
+        assert!(d.worlds.contains_key(&-3));
     }
 }
