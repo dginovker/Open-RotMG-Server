@@ -9,13 +9,13 @@ fn rejects<T>(result: Result<T>, message: &str) {
 fn arachna_realm_exit_preserves_parent_or_explicit_random_route() {
     let content = Arc::new(Content::load(std::path::Path::new("data")).unwrap());
     let mut d = Directory::test_with_seed(std::path::Path::new("data"), content, 2, 1308).unwrap();
-    for origin in [1, -2] {
+    for origin in [-3, -2] {
         let route = d.dungeon_return_from(origin).unwrap();
         let dungeon = d.instance("spider-den", None, Some(route)).unwrap();
         let world = d.worlds.get_mut(&dungeon).unwrap();
         let mut ch = Character::fresh(world.content.get(0x30e).unwrap()).unwrap();
-        ch.account = origin + 3;
-        ch.id = origin + 3;
+        ch.account = origin + 4;
+        ch.id = origin + 4;
         let player = world.enter(ch, None).unwrap();
         let exit = world.spawn_exit(0x704, world.players[&player].pos).unwrap();
         world.players.get_mut(&player).unwrap().pos = world.entities[&exit].pos;

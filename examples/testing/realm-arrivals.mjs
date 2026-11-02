@@ -1,10 +1,10 @@
 import {writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
-const spec={class:0x307,level:20,seed:785,world:1,position:'spawn',equipment:[0xc02,-1,-1,-1],backpack:Array(8).fill(-1),stats:null};
+const spec={class:0x307,level:20,seed:785,world:-3,position:'spawn',equipment:[0xc02,-1,-1,-1],backpack:Array(8).fill(-1),stats:null};
 let world;
 const arrival=index=>({x:world.spawn_points[index][0],y:world.spawn_points[index][1]});
 export async function prepare(api){
-  world=await api({op:'world_info',world:1});
+  world=await api({op:'world_info',world:-3});
   if(world.spawn_points.length!==12||!world.realm_layout)throw Error('Expected twelve arrivals in a registered Realm');
   await writeFile(join(process.env.QA_RESULTS_DIR,'realm.json'),JSON.stringify(world));
   return {...spec,position:arrival(0)};

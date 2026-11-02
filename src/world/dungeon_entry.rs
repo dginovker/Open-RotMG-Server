@@ -4,7 +4,7 @@ const LIFETIME_MS: u64 = 10_000;
 const CAPACITY: usize = 32;
 
 pub(super) struct Witness {
-    source: i32,
+    pub(super) source: i32,
     portal: i32,
     kind: u16,
     entrant: i32,

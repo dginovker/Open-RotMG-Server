@@ -36,6 +36,7 @@ pub(super) struct Snapshot {
     pub bags_empty: bool,
     pub critical: bool,
     pub portals_pending: bool,
+    pub return_route: Option<super::DungeonReturn>,
     pub chamber_at: Option<u64>,
     pub portal_displays: BTreeMap<i32, PortalDisplay>,
     pub published: Instant,
@@ -69,6 +70,7 @@ impl Snapshot {
             bags_empty: world.bag_expiry.is_empty(),
             critical: !world.critical_deaths.is_empty(),
             portals_pending: !world.portal_requests.is_empty(),
+            return_route: world.return_route,
             chamber_at: if world.name == "Oryx's Castle" && world.cleared {
                 world
                     .actors()
@@ -510,7 +512,7 @@ impl Worlds {
             entry.release();
         }
     }
-    pub(super) fn prepare_replacement<T: Send + 'static>(
+    pub(super) fn prepare_realm<T: Send + 'static>(
         &self,
         origin: i32,
         tick: u64,
@@ -527,10 +529,10 @@ impl Worlds {
                 elapsed_us = measure.wall.as_micros(),
                 cpu_us = measure.cpu.map(|cpu| cpu.as_micros()),
                 error = ?result.as_ref().err().map(|error| format!("{error:#}")),
-                "unpublished Realm replacement construction completed"
+                "unpublished Realm construction completed"
             );
             if sender.send(result).is_err() {
-                tracing::info!(origin, "unpublished Realm replacement recipient closed");
+                tracing::info!(origin, "unpublished Realm construction recipient closed");
             }
             Ok(())
         };

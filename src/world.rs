@@ -977,6 +977,7 @@ pub struct Directory {
     performance: crate::performance::Window,
     attribution: crate::performance::attribution::Attribution,
     max_players: usize,
+    realm_limit: usize,
     prepared_seed: Option<u64>,
 }
 impl Directory {
@@ -1172,6 +1173,7 @@ impl Directory {
             performance: crate::performance::Window::default(),
             attribution: crate::performance::attribution::Attribution::default(),
             max_players,
+            realm_limit: realm_count,
             prepared_seed,
         };
         for (id, template, name, safe) in [
@@ -1183,24 +1185,20 @@ impl Directory {
             let world = d.make(template, name, safe, None)?;
             d.worlds.insert(id, world);
         }
-        for slot in 0..realm_count {
-            let origin = if slot == 0 {
-                -3
-            } else {
-                let id = d.next_world;
-                let world = d.make("realm-shore", "Realm", false, None)?;
-                d.worlds.insert(id, world);
-                d.next_world += 1;
-                id
-            };
-            d.bind_realm_heroes(origin, d.worlds[&origin].hero_identities())?;
-            let name =
-                (seed as usize % realm_portal::NAMES.len() + slot) % realm_portal::NAMES.len();
-            let portal = d.install_realm_portal(origin, None)?;
-            let record = d.endgame.realms.get_mut(&origin).unwrap();
-            record.name = name;
-            record.portal = Some(portal);
-        }
+        d.bind_realm_heroes(-3, d.worlds[&-3].hero_identities())?;
+        let portal = d.install_realm_portal(-3, None)?;
+        let record = d.endgame.realms.get_mut(&-3).unwrap();
+        record.name = seed as usize % realm_portal::NAMES.len();
+        record.portal = Some(portal);
+        tracing::info!(
+            lineage_ceiling = realm_count,
+            startup_lineages = 1,
+            growth_percent = 80,
+            growth_ms = 30_000,
+            retirement_percent = 60,
+            retirement_ms = 300_000,
+            "Realm allocation reconstruction policy; realm_count is a ceiling, not startup count"
+        );
         d.sync_realm_portal();
         Ok(d)
     }
@@ -2259,6 +2257,7 @@ impl Directory {
     // Another world's completion or a timer must not publish this world's queued effects early.
     fn coordinate(&mut self, ready: &[i32]) {
         self.endgame_step(ready);
+        self.realm_allocation_step();
         self.sync_realm_portal();
         self.worlds.release_world(&-2);
         let requesting: Vec<_> = self

@@ -1469,7 +1469,7 @@ mod tests {
             let directory =
                 Directory::configured(path, content, 85, seed, Some(seed), vec![source], 2)
                     .unwrap();
-            for id in [-3, 1] {
+            for id in [-3] {
                 let world = &directory.worlds[&id];
                 assert_eq!(world.realm_layout.as_deref(), Some(name));
                 assert_eq!((world.map.width, world.map.height), (side, side));

@@ -34,7 +34,7 @@ export async function run(game){
   async function hall(client){
     for(let n=0;n<65;n++){
       const state=await client.inspect(),portals=state.diagnostic.entities.filter(e=>e.kind===0x712);
-      if(portals.length===2)return portals;
+      if(portals.length>=1)return portals;
       await client.act({keys:['d','w'],duration_ms:300});
     }
     throw Error('Two entrances not revealed in Nexus');
@@ -49,7 +49,14 @@ export async function run(game){
     for(let n=0;n<10&&(await client.observe()).world!=='Nexus';n++)await client.act({keys:[],duration_ms:500});
     assert.equal((await client.observe()).world,'Nexus');
   }
-  const initial=await save('initial'),portals=await hall(game);
+  const initial=await save('initial');
+  const watcher=await game.join({...spec,seed:902,world:-3});
+  await api({op:'cheat',actor:watcher.actor,change:{kind:'protection',condition:'invincible',duration_ms:60000}});
+  for(let n=0;n<4;n++)await game.act({keys:[],duration_ms:10000});
+  await escape(watcher);
+  let portals=await hall(game);
+  for(let n=0;n<65&&portals.length<2;n++){await game.act({keys:['d','w'],duration_ms:300});portals=(await game.inspect()).diagnostic.entities.filter(e=>e.kind===0x712);}
+  assert.equal(portals.length,2,'Demand must independently create the second lineage');
   const visible=(await game.inspect()).view.objects;
   // The lowered disposable capacity identifies the exact prepared Realm without changing name policy.
   const old=portals.find(p=>visible.find(o=>o.id===p.id)?.name.endsWith('(0/1)'));
@@ -61,7 +68,6 @@ export async function run(game){
   assert.equal((await game.observe()).session.world,-3);
   await escape(game);
   game.check('same living character enters and returns through the original entrance', (await game.observe()).session.character===initial.view.session.character);
-  const watcher=await game.join({...spec,seed:902});
   await hall(watcher);await walk(watcher,other.pos);
   const unaffected=await save('other-before',watcher);
   const rejected=await api({op:'prepare_realm_closure',world:-3},false);

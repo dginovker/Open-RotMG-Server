@@ -26,6 +26,7 @@ pub struct Config {
     pub bot_session_seconds: [u64; 2],
     pub realm_seed: u64,
     #[serde(default = "default_realm_count")]
+    /// Maximum maintained Realm lineages (2 or 3); startup creates one.
     pub realm_count: usize,
 }
 fn default_realm_count() -> usize {

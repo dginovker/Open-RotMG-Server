@@ -1,6 +1,7 @@
 use super::*;
 use crate::endgame::{CASTLE, CELLAR, HEROES, INCANTATION, LOCKED_CELLAR, RealmCycle, RealmStage};
 use rand::seq::IteratorRandom;
+mod allocation;
 
 // Gameplay documentation specifies two minutes, unlike modified forks' 20s: https://wikiwiki.jp/rmd/イベント#jded12e1
 pub(super) const REMAINING_TAUNT_MS: u64 = 120_000;
@@ -9,7 +10,13 @@ pub(super) const REMAINING_TAUNT_MS: u64 = 120_000;
 pub(super) struct RealmDirectory {
     pub realms: BTreeMap<i32, RealmRecord>,
     pub(super) forced: BTreeMap<i32, ForcedRoute>,
-    preparing: Option<RealmPreparation>,
+    preparing: Option<Preparation>,
+    demand_since: Option<u64>,
+    empty_since: BTreeMap<i32, u64>,
+}
+enum Preparation {
+    Replacement(RealmPreparation),
+    Demand(allocation::DemandPreparation),
 }
 struct RealmPreparation {
     origin: i32,
@@ -572,37 +579,15 @@ impl Directory {
             .endgame
             .realms
             .iter()
-            .filter(|(id, record)| {
-                record.replacement.is_some()
-                    && record.publish_at.is_none()
-                    && record.pending_transfers.is_empty()
-                    && self
-                        .worlds
-                        .summary(id)
-                        .expect("retiring Realm metadata missing")
-                        .players
-                        .is_empty()
-                    && !self
-                        .grants
-                        .values()
-                        .any(|g| g.origin == Some(**id) || g.destination == **id)
-                    && !self
-                        .endgame
-                        .forced
-                        .values()
-                        .any(|route| route.origin == **id)
+            .filter(|(_, r)| {
+                r.replacement.is_some() && r.publish_at.is_none() && r.pending_transfers.is_empty()
             })
             .map(|(id, _)| *id)
             .collect();
         for origin in retired {
-            self.portals.retain(|_, p| p.origin != origin);
-            if let Some(portal) = self.endgame.realms[&origin].portal {
-                self.worlds.get_mut(&-2).unwrap().remove_entity(portal);
+            if self.realm_dependencies_clear(origin) {
+                self.remove_empty_realm(origin);
             }
-            self.worlds.remove(&origin);
-            self.idle.remove(&origin);
-            self.endgame.realms.remove(&origin);
-            tracing::info!(origin, "empty retired Realm removed");
         }
     }
     pub(crate) fn realm_departed(&mut self, origin: i32, player: i32) {
@@ -620,7 +605,10 @@ impl Directory {
     }
     fn replace_realm(&mut self, origin: i32) -> Result<()> {
         ensure!(self.worlds.contains_key(&origin), "closing Realm missing");
-        if let Some(preparation) = &self.endgame.preparing {
+        if matches!(self.endgame.preparing, Some(Preparation::Demand(_))) {
+            return Ok(());
+        }
+        if let Some(Preparation::Replacement(preparation)) = &self.endgame.preparing {
             if preparation.origin != origin {
                 return Ok(());
             }
@@ -641,7 +629,7 @@ impl Directory {
             let realm = self.construction("realm-shore", "Realm", false, None);
             let realm_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let started = realm_started.clone();
-            let result = match self.worlds.prepare_replacement(origin, self.tick, move || {
+            let result = match self.worlds.prepare_realm(origin, self.tick, move || {
                 let castle = castle()?;
                 started.store(true, std::sync::atomic::Ordering::Release);
                 let realm = realm()?;
@@ -655,17 +643,20 @@ impl Directory {
                 }
             };
             // One unpublished build preserves Realm selection/publication order without occupying simulation workers.
-            self.endgame.preparing = Some(RealmPreparation {
+            self.endgame.preparing = Some(Preparation::Replacement(RealmPreparation {
                 origin,
                 castle: castle_id,
                 realm: realm_id,
                 rng_before,
                 realm_started,
                 result,
-            });
+            }));
             self.next_world = next;
         }
-        let result = match self.endgame.preparing.as_mut().unwrap().result.try_recv() {
+        let Some(Preparation::Replacement(preparation)) = self.endgame.preparing.as_mut() else {
+            unreachable!("replacement owns construction");
+        };
+        let result = match preparation.result.try_recv() {
             Ok(result) => result,
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return Ok(()),
             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
@@ -673,7 +664,9 @@ impl Directory {
                 bail!("Realm preparation worker stopped without returning its result");
             }
         };
-        let preparation = self.endgame.preparing.take().unwrap();
+        let Some(Preparation::Replacement(preparation)) = self.endgame.preparing.take() else {
+            unreachable!("replacement owns construction");
+        };
         if !preparation
             .realm_started
             .load(std::sync::atomic::Ordering::Acquire)
@@ -1171,6 +1164,7 @@ async fn realm_death_credit_survives_portal_reward_failure() {
         .await
         .unwrap();
     let mut directory = Directory::prepared(data, content.clone(), 16, 12351, 2).unwrap();
+    directory.grow_realm_for_test();
     let mut map = Map {
         width: 40,
         height: 40,
@@ -1397,6 +1391,7 @@ fn prepare_realm_closure_preserves_other_cycle_and_refuses_reservations() {
     let content = Arc::new(Content::load(path).unwrap());
     let mut d = Directory::prepared(path, content, 16, 12351, 2).unwrap();
     d.clock.set_paused(true);
+    d.grow_realm_for_test();
     let other = d.endgame.realms[&1].cycle.remaining.clone();
     let other_spawns = d.worlds[&1].map.spawns.clone();
     d.issue(7, 7, -3).unwrap();

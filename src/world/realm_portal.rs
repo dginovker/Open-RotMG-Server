@@ -115,6 +115,7 @@ fn realm_portal_counts_reservations_and_retires_closed_entrances() {
     let path = std::path::Path::new("data");
     let content = Arc::new(Content::load(path).unwrap());
     let mut d = Directory::test_with_seed(path, content, 1, 901).unwrap();
+    d.grow_realm_for_test();
     let portal = d.endgame.realms[&-3].portal.unwrap();
     let other = d.endgame.realms[&1].portal.unwrap();
     let names: BTreeSet<_> = d.endgame.realms.values().map(|r| r.name).collect();
@@ -158,7 +159,9 @@ fn realm_entrance_seeded_legal_stationary_and_bounded() {
     let path = std::path::Path::new("data");
     let content = Arc::new(Content::load(path).unwrap());
     let mut d = Directory::prepared(path, content.clone(), 16, 901, 2).unwrap();
-    let same = Directory::prepared(path, content, 16, 901, 2).unwrap();
+    let mut same = Directory::prepared(path, content, 16, 901, 2).unwrap();
+    d.grow_realm_for_test();
+    same.grow_realm_for_test();
     let positions = |d: &Directory| {
         d.endgame
             .realms

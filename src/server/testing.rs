@@ -1351,6 +1351,7 @@ async fn prepared_realm_closure_guards_and_selected_realm_isolation() {
         crate::world::Directory::prepared(Path::new("data"), app.content.clone(), 16, 12351, 2)
             .unwrap();
     d.clock.set_paused(true);
+    d.grow_realm_for_test();
     let other: Vec<_> = d.worlds[&1]
         .entities
         .values()

@@ -6,11 +6,11 @@ import {inflateSync} from 'node:zlib';
 const layout=process.env.REALM_LAYOUT,firstCoast=Number(process.env.REALM_ARRIVAL);
 assert(['02','03'].includes(layout),'Set REALM_LAYOUT to 02 or 03');
 assert(/^[0-3]$/.test(process.env.REALM_ARRIVAL),'Set REALM_ARRIVAL to 0, 1, 2 or 3');
-const spec={class:0x307,level:20,seed:785,world:1,position:'spawn',equipment:[0xc02,-1,-1,-1],backpack:Array(8).fill(-1),stats:[700,252,50,25,50,50,40,50]};
+const spec={class:0x307,level:20,seed:785,world:-3,position:'spawn',equipment:[0xc02,-1,-1,-1],backpack:Array(8).fill(-1),stats:[700,252,50,25,50,50,40,50]};
 let world,worldId;
 const arrival=i=>({x:world.spawn_points[i][0],y:world.spawn_points[i][1]});
 export async function prepare(api){
-  const worlds=await Promise.all([-3,1].map(async id=>({id,info:await api({op:'world_info',world:id})})));
+  const worlds=await Promise.all([-3].map(async id=>({id,info:await api({op:'world_info',world:id})})));
   await writeFile(join(process.env.QA_RESULTS_DIR,'startup-realms.json'),JSON.stringify(worlds));
   const selected=worlds.find(w=>w.info.realm_layout===`classic-world-${layout}-reconstruction`);
   assert(selected,`World ${layout} is absent from this startup's random Realm selection`);
