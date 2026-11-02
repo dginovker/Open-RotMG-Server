@@ -4,7 +4,7 @@ import {join} from 'node:path';
 
 export const realmSeed=12351;
 let api;
-const spec={class:0x30e,level:20,seed:901,world:-2,position:'spawn',equipment:[0xa97,0xa2e,0xb05,0xac5],backpack:Array(8).fill(-1),stats:[670,385,50,25,50,50,40,75]};
+const spec={class:0x30e,level:20,seed:901,world:-2,position:'spawn',equipment:[0xa97,0xa2e,0xb05,0xac5],backpack:Array(8).fill(-1),stats:[670,385,50,25,50,50,40,60]};
 export async function prepare(){
   const root=join(process.env.QA_RESULTS_DIR,'native'),{origin}=JSON.parse(await readFile(join(root,'result.json'),'utf8'));
   const token=(await readFile(join(root,'state','control.token'),'utf8')).trim();
