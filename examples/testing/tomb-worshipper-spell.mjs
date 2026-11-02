@@ -6,7 +6,8 @@ import {setTimeout as delay} from 'node:timers/promises';
 export const fixture={class:0x310,level:20,seed:12351,world:'tomb-of-the-ancients',worldSeed:12,position:{x:145.1,y:112.5},equipment:[0xa04,0xc1e,0xb05,0xacd],backpack:Array(8).fill(-1),stats:[670,385,50,25,50,50,40,75]};
 const wizard={...fixture,class:0x30e,position:{x:146.8,y:112.5},equipment:[0xb08,0xad5,0xb05,0xacd],stats:[670,385,75,25,50,75,40,60]};
 export async function run(game){
-  const mage=await game.join(wizard),peers=[game,mage],out=process.env.QA_RESULTS_DIR,snapshots=[],samples=[],casts=[],healing=[];let target,sarc,latest,players=[],failure;
+  // A template name creates another dungeon; join the primary's observed instance without a new seed.
+  const mage=await game.join({...wizard,world:(await game.observe()).session.world,worldSeed:undefined}),peers=[game,mage],out=process.env.QA_RESULTS_DIR,snapshots=[],samples=[],casts=[],healing=[];let target,sarc,latest,players=[],failure;
   const save=async label=>{const party=await Promise.all(peers.map(async g=>({actor:g.actor,observed:await g.observe(),inspected:await g.inspect()})));const s={label,party};snapshots.push(s);return s;};
   const safe=s=>s.party.forEach(p=>assert(p.observed.lifecycle.alive&&p.inspected.view.character.hp>300&&p.observed.game_ms<26000,'Living party health-above300 and exposure-below26000 required'));
   const npc=s=>s.diagnostic.entities.find(e=>e.id===target);
