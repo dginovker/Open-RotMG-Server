@@ -52,6 +52,44 @@ fn private_create(path: &Path) -> Result<File> {
     }
     Ok(options.open(path)?)
 }
+fn sync_staging(file: &File, operation: &str) -> Result<()> {
+    #[cfg(test)]
+    if std::env::var("ACCOUNT_SAVE_FAIL_STAGING_FLUSH").as_deref() == Ok(operation) {
+        return Err(std::io::Error::other("injected staging flush failure").into());
+    }
+    file.sync_all()
+        .with_context(|| format!("flush {operation} staging file"))
+}
+#[cfg(windows)]
+fn publish_distinct(staging: &Path, destination: &Path) -> Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
+    }
+    ensure!(
+        staging.parent() == destination.parent(),
+        "durable publication requires same-parent staging"
+    );
+    let source: Vec<u16> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // WRITE_THROUGH waits for the move on disk; neither replacement nor cross-volume copy is allowed.
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 8) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("durable distinct Windows publication");
+    }
+    Ok(true)
+}
+#[cfg(not(windows))]
+fn publish_distinct(staging: &Path, destination: &Path) -> Result<bool> {
+    std::fs::hard_link(staging, destination).context("publish distinct file")?;
+    sync_parent(destination)?;
+    Ok(false)
+}
 fn sync_parent(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -67,6 +105,7 @@ pub(crate) fn snapshot(database: &Path, destination: &Path, content: &Content) -
     // Reserve privately before SQLite opens it; a partial file is never reported as a verified backup.
     let staging = destination.with_extension(format!("partial-{:016x}", rand::random::<u64>()));
     let reserved = private_create(&staging)?;
+    let mut consumed = false;
     let result = (|| -> Result<()> {
         let mut output = Connection::open(&staging)?;
         let backup = rusqlite::backup::Backup::new(&source, &mut output)?;
@@ -74,17 +113,20 @@ pub(crate) fn snapshot(database: &Path, destination: &Path, content: &Content) -
         drop(backup);
         verify(&output, content)?;
         output.close().map_err(|(_, e)| e)?;
-        reserved.sync_all()?;
-        std::fs::hard_link(&staging, destination).context("publish distinct verified snapshot")?;
+        sync_staging(&reserved, "snapshot")?;
+        drop(reserved);
+        consumed = publish_distinct(&staging, destination)?;
         #[cfg(test)]
         if std::env::var_os("ACCOUNT_SAVE_SNAPSHOT_FAIL_AFTER_PUBLISH").is_some() {
             anyhow::bail!("PRIVATE_FAILURE_CANARY");
         }
-        sync_parent(destination)?;
         Ok(())
     })();
-    std::fs::remove_file(&staging).context("remove snapshot staging file")?;
-    result
+    if consumed {
+        result
+    } else {
+        result.and(std::fs::remove_file(&staging).context("remove snapshot staging file"))
+    }
 }
 fn restore_database(source: &Connection, target: &mut Connection) -> Result<()> {
     let copy = rusqlite::backup::Backup::new(source, target)?;

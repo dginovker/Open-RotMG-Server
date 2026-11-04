@@ -227,9 +227,9 @@ fn startup_backup_refuses_bad_sources_or_existing_destinations_without_creating_
     }
 }
 #[tokio::test]
-async fn startup_backup_ack_publication_failure_aborts_main_before_migration_or_listening() {
+async fn startup_backup_publication_and_flush_failures_abort_main_before_migration_or_listening() {
     if let Ok(root) = std::env::var("STARTUP_BACKUP_TEST_ROOT") {
-        let result = crate::serve(
+        let error = crate::serve(
             vec![
                 "--desktop".into(),
                 "--config".into(),
@@ -237,54 +237,108 @@ async fn startup_backup_ack_publication_failure_aborts_main_before_migration_or_
             ],
             tokio::runtime::Handle::current(),
         )
-        .await;
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("acknowledgement")
-        );
+        .await
+        .unwrap_err();
+        let expected = std::env::var("STARTUP_BACKUP_EXPECTED_ERROR").unwrap();
+        assert!(format!("{error:#}").contains(&expected), "{error:#}");
         return;
     }
-    let root = root();
-    let state = root.join("state");
-    let path = state.join("game.db");
-    let content = Content::load(Path::new("data")).unwrap();
-    drop(Store::open(&path, &content).unwrap());
-    schema21(&path);
-    let before = dump(&path);
-    let client = root.join("client");
-    std::fs::create_dir_all(client.join("vendor")).unwrap();
-    for name in ["index.html", "vendor/ruffle.js", "client.swf"] {
-        std::fs::write(client.join(name), b"fixture").unwrap();
+    for failure in ["publication", "snapshot", "acknowledgement"] {
+        let root = root();
+        let state = root.join("state");
+        let path = state.join("game.db");
+        let content = Content::load(Path::new("data")).unwrap();
+        let store = Store::open(&root.join("baseline.db"), &content).unwrap();
+        snapshot(&root.join("baseline.db"), &path, &content).unwrap();
+        drop(store);
+        schema21(&path);
+        let before = dump(&path);
+        let client = root.join("client");
+        std::fs::create_dir_all(client.join("vendor")).unwrap();
+        for name in ["index.html", "vendor/ruffle.js", "client.swf"] {
+            std::fs::write(client.join(name), b"fixture").unwrap();
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind = listener.local_addr().unwrap();
+        drop(listener);
+        let backup = root.join("backups/required.db");
+        let config = serde_json::json!({"bind":bind.to_string(),"origin":format!("http://{bind}"),"data":std::fs::canonicalize("data").unwrap(),"client":client,"state":state,"pre_migration_backup":backup,"max_players":85,"behind_proxy":false,"shore_bots":false,"bot_llm":false,"realm_seed":42});
+        std::fs::write(
+            root.join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "account_save::startup_backup::tests::startup_backup_publication_and_flush_failures_abort_main_before_migration_or_listening", "--nocapture"])
+            .env("STARTUP_BACKUP_TEST_ROOT", &root);
+        if failure == "publication" {
+            command
+                .env("STARTUP_BACKUP_FAIL_ACK", "1")
+                .env("STARTUP_BACKUP_EXPECTED_ERROR", "acknowledgement");
+        } else {
+            command.env("ACCOUNT_SAVE_FAIL_STAGING_FLUSH", failure).env(
+                "STARTUP_BACKUP_EXPECTED_ERROR",
+                "injected staging flush failure",
+            );
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(dump(&path), before);
+        assert_eq!(
+            readonly(&path)
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0))
+                .unwrap(),
+            21
+        );
+        assert_eq!(backup.is_file(), failure != "snapshot");
+        assert_eq!(
+            PathBuf::from(format!("{}.ack.json", backup.display())).is_dir(),
+            failure == "publication"
+        );
+        assert!(std::fs::read_dir(root.join("backups")).unwrap().all(|p| {
+            !p.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("partial-")
+        }));
+        assert!(std::net::TcpStream::connect(bind).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let bind = listener.local_addr().unwrap();
-    drop(listener);
-    let backup = root.join("backups/required.db");
-    let config = serde_json::json!({"bind":bind.to_string(),"origin":format!("http://{bind}"),"data":std::fs::canonicalize("data").unwrap(),"client":client,"state":state,"pre_migration_backup":backup,"max_players":85,"behind_proxy":false,"shore_bots":false,"bot_llm":false,"realm_seed":42});
-    std::fs::write(
-        root.join("config.json"),
-        serde_json::to_vec(&config).unwrap(),
-    )
-    .unwrap();
-    let result=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","account_save::startup_backup::tests::startup_backup_ack_publication_failure_aborts_main_before_migration_or_listening","--nocapture"]).env("STARTUP_BACKUP_TEST_ROOT",&root).env("STARTUP_BACKUP_FAIL_ACK","1").output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(dump(&path), before);
-    assert_eq!(
-        readonly(&path)
-            .unwrap()
-            .query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0))
-            .unwrap(),
-        21
-    );
-    assert!(backup.is_file());
-    assert!(PathBuf::from(format!("{}.ack.json", backup.display())).is_dir());
-    assert!(std::net::TcpStream::connect(bind).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_startup_backup_durable_publication_consumes_staging_and_never_replaces() {
+    let root = root();
+    let staging = root.join("backups/stage");
+    let destination = root.join("backups/final");
+    let mut file = private_create(&staging).unwrap();
+    file.write_all(b"verified bytes").unwrap();
+    sync_staging(&file, "snapshot").unwrap();
+    drop(file);
+    assert!(publish_distinct(&staging, &destination).unwrap());
+    assert!(!staging.exists());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"verified bytes");
+    std::fs::write(&staging, b"must not replace").unwrap();
+    assert!(publish_distinct(&staging, &destination).is_err());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"verified bytes");
+    assert_eq!(std::fs::read(&staging).unwrap(), b"must not replace");
+    let ack = root.join("backups/final.ack.json");
+    publish_ack(&ack, b"{\"protocol\":1}").unwrap();
+    assert_eq!(std::fs::read(&ack).unwrap(), b"{\"protocol\":1}");
+    assert!(publish_ack(&ack, b"must not replace").is_err());
+    assert_eq!(std::fs::read(&ack).unwrap(), b"{\"protocol\":1}");
+    assert!(std::fs::read_dir(root.join("backups")).unwrap().all(|p| {
+        !p.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("partial-")
+    }));
     std::fs::remove_dir_all(root).unwrap();
 }

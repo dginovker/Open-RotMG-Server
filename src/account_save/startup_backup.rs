@@ -98,15 +98,19 @@ fn hash_file(path: &Path) -> Result<String> {
 fn publish_ack(path: &Path, bytes: &[u8]) -> Result<()> {
     let staging = path.with_extension(format!("partial-{:016x}", rand::random::<u64>()));
     let mut file = private_create(&staging)?;
+    let mut consumed = false;
     let result = (|| -> Result<()> {
         file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::hard_link(&staging, path).context("publish distinct startup acknowledgement")?;
-        sync_parent(path)?;
+        sync_staging(&file, "acknowledgement")?;
+        drop(file);
+        consumed = publish_distinct(&staging, path)?;
         Ok(())
     })();
-    std::fs::remove_file(&staging).context("remove startup acknowledgement staging")?;
-    result
+    if consumed {
+        result
+    } else {
+        result.and(std::fs::remove_file(&staging).context("remove startup acknowledgement staging"))
+    }
 }
 pub(crate) fn pre_migration_backup(
     state: &Path,
