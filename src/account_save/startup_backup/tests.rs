@@ -342,3 +342,146 @@ fn windows_startup_backup_durable_publication_consumes_staging_and_never_replace
     }));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn startup_backup_mount_identity_rejects_synthetic_root_and_descendant_aliases_without_fallback() {
+    let mut state: libc::statx = unsafe { std::mem::zeroed() };
+    state.stx_mask = libc::STATX_MNT_ID;
+    state.stx_mnt_id = 42;
+    state.stx_dev_major = 8;
+    state.stx_dev_minor = 1;
+    state.stx_ino = 100;
+    let mut sibling = state;
+    sibling.stx_ino = 200;
+    require_same_mount(mount_id(&state).unwrap(), mount_id(&sibling).unwrap()).unwrap();
+    for (alias, inode) in [
+        ("root bind", 100),
+        ("descendant bind", 101),
+        ("other cross-mount", 300),
+    ] {
+        let mut parent = state;
+        parent.stx_mnt_id = 43;
+        parent.stx_ino = inode;
+        assert_eq!(
+            (parent.stx_dev_major, parent.stx_dev_minor),
+            (state.stx_dev_major, state.stx_dev_minor)
+        );
+        assert!(
+            require_same_mount(mount_id(&state).unwrap(), mount_id(&parent).unwrap()).is_err(),
+            "{alias}"
+        );
+    }
+    state.stx_mask = 0;
+    assert!(
+        mount_id(&state)
+            .unwrap_err()
+            .to_string()
+            .contains("STATX_MNT_ID unavailable")
+    );
+    let root = root();
+    assert_eq!(
+        query_mount_id(&root.join("state")).unwrap(),
+        query_mount_id(&root.join("backups")).unwrap()
+    );
+    assert!(
+        query_mount_id(&root.join("absent"))
+            .unwrap_err()
+            .to_string()
+            .contains("query startup backup mount identity")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the owned isolated user+mount namespace wrapper startup-backup-mounts.py"]
+fn startup_backup_rejects_native_root_and_descendant_bind_mounts() {
+    for (namespace, variable) in [
+        ("mnt", "STARTUP_BACKUP_ORIGINAL_MOUNT_NS"),
+        ("user", "STARTUP_BACKUP_ORIGINAL_USER_NS"),
+    ] {
+        let original =
+            std::env::var_os(variable).expect("run only through the owned namespace wrapper");
+        assert_ne!(
+            std::fs::read_link(format!("/proc/self/ns/{namespace}")).unwrap(),
+            PathBuf::from(original)
+        );
+    }
+    let owner = std::env::var("STARTUP_BACKUP_ORIGINAL_UID")
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert_ne!(owner, 0);
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    let mapping = std::fs::read_to_string("/proc/self/uid_map")
+        .unwrap()
+        .split_whitespace()
+        .map(|n| n.parse::<u32>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(mapping, vec![0, owner, 1]);
+    // Propagation must be private before the first owned bind, even if the wrapper changes defaults.
+    assert_eq!(
+        unsafe {
+            libc::mount(
+                std::ptr::null(),
+                c"/".as_ptr(),
+                std::ptr::null(),
+                libc::MS_REC | libc::MS_PRIVATE,
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    let root = root();
+    let state = root.join("state");
+    std::fs::create_dir(state.join("nested")).unwrap();
+    let content = Content::load(Path::new("data")).unwrap();
+    let lock = StateLock::acquire(&state).unwrap();
+    for source in [&state, &state.join("nested")] {
+        let alias = root.join("bind-alias");
+        std::fs::create_dir(&alias).unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let from = std::ffi::CString::new(source.as_os_str().as_bytes()).unwrap();
+        let to = std::ffi::CString::new(alias.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe {
+                libc::mount(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND,
+                    std::ptr::null(),
+                )
+            },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        let parent_id = query_mount_id(&alias).unwrap();
+        let state_id = query_mount_id(&state).unwrap();
+        assert_ne!(parent_id, state_id);
+        println!(
+            "owned bind source={} target={} state_mount={state_id} alias_mount={parent_id}",
+            source.display(),
+            alias.display()
+        );
+        let output = alias.join("must-not-publish.db");
+        let result = pre_migration_backup(&state, &output, &content, &lock);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("crosses Linux mounts")
+        );
+        assert!(
+            !output.exists()
+                && !PathBuf::from(format!("{}.ack.json", output.display())).exists()
+                && !state.join("game.db").exists()
+        );
+        assert_eq!(unsafe { libc::umount2(to.as_ptr(), 0) }, 0);
+        std::fs::remove_dir(alias).unwrap();
+    }
+    drop(lock);
+    std::fs::remove_dir_all(root).unwrap();
+}

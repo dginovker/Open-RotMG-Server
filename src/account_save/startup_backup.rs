@@ -64,6 +64,43 @@ fn same_directory(a: &Path, b: &Path) -> Result<bool> {
     );
     Ok(result == 2)
 }
+#[cfg(target_os = "linux")]
+fn mount_id(metadata: &libc::statx) -> Result<u64> {
+    ensure!(
+        metadata.stx_mask & libc::STATX_MNT_ID != 0,
+        "STATX_MNT_ID unavailable; startup backup containment requires Linux 5.8+ mount identity"
+    );
+    Ok(metadata.stx_mnt_id)
+}
+#[cfg(target_os = "linux")]
+fn query_mount_id(path: &Path) -> Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let mut metadata: libc::statx = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::statx(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            0,
+            libc::STATX_MNT_ID,
+            &mut metadata,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("query startup backup mount identity with statx (Linux 5.8+ required)");
+    }
+    mount_id(&metadata)
+}
+#[cfg(target_os = "linux")]
+fn require_same_mount(state: u64, parent: u64) -> Result<()> {
+    // Bind roots below state retain dev/inode but acquire a different mount ID.
+    ensure!(
+        state == parent,
+        "startup backup crosses Linux mounts ({state} != {parent}); outside-state containment is ambiguous"
+    );
+    Ok(())
+}
 fn outside_state(state: &Path, backup: &Path) -> Result<()> {
     let state = state
         .canonicalize()
@@ -74,6 +111,8 @@ fn outside_state(state: &Path, backup: &Path) -> Result<()> {
         .canonicalize()
         .context("resolve existing startup backup parent")?;
     ensure!(parent.is_dir(), "startup backup parent is not a directory");
+    #[cfg(target_os = "linux")]
+    require_same_mount(query_mount_id(&state)?, query_mount_id(&parent)?)?;
     for ancestor in parent.ancestors() {
         ensure!(
             !same_directory(ancestor, &state)?,
