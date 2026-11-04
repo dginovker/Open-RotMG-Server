@@ -377,3 +377,66 @@ async fn synthetic_changed_body_uses_new_namespace_despite_identical_file_mtime(
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn desktop_namespace_preserves_existing_swf_audio_api_and_websocket_drain_fences() {
+    let (dir, app) = fixture();
+    crate::server::lifecycle::drain::prepare(&app);
+    for (desktop, generation) in [(false, None), (true, None), (true, Some(GENERATION))] {
+        let (url, _, server) = start(&app, &dir, desktop, generation).await;
+        for path in ["client.swf", "sfx/fixture.ogg"] {
+            assert_eq!(
+                client()
+                    .get(format!("{url}{}{path}", entry(generation)))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+        assert_eq!(
+            client()
+                .post(format!("{url}/legacy-api/account/verify"))
+                .form(&[("guid", "cache-fixture"), ("password", "")])
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            client()
+                .get(format!("{url}/game"))
+                .header("origin", &app.origin)
+                .header("connection", "Upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            client()
+                .get(format!("{url}{}launcher.js", entry(generation)))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            client()
+                .get(format!("{url}/health"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        server.abort();
+    }
+}

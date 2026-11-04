@@ -3236,13 +3236,19 @@ fn client_assets(a: &App, client: &std::path::Path) -> Router<App> {
             tower_http::services::ServeFile::new(client.join(file)),
         );
     }
+    let game = Router::new()
+        .nest_service("/sfx", tower_http::services::ServeDir::new(a.sfx.clone()))
+        .route("/client.swf", get(swf))
+        .route_layer(axum::middleware::from_fn_with_state(
+            a.clone(),
+            lifecycle::drain::http_entry,
+        ));
     router
         .nest_service(
             "/vendor",
             tower_http::services::ServeDir::new(client.join("vendor")),
         )
-        .nest_service("/sfx", tower_http::services::ServeDir::new(a.sfx.clone()))
-        .route("/client.swf", get(swf))
+        .merge(game)
 }
 
 fn routes(a: &App, client: PathBuf, desktop: bool, client_generation: Option<&str>) -> Router {
