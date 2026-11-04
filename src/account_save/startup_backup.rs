@@ -21,9 +21,17 @@ fn require_new(path: &Path) -> Result<()> {
         Ok(_) => anyhow::bail!("startup destination already exists: {}", path.display()),
     }
 }
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn same_directory(a: &Path, b: &Path) -> Result<bool> {
-    Ok(a == b)
+    use std::os::unix::fs::MetadataExt;
+    // Directory identity also covers case-insensitive Unix volumes and mount aliases.
+    let a = std::fs::metadata(a)?;
+    let b = std::fs::metadata(b)?;
+    Ok(a.dev() == b.dev() && a.ino() == b.ino())
+}
+#[cfg(not(any(unix, windows)))]
+fn same_directory(_: &Path, _: &Path) -> Result<bool> {
+    anyhow::bail!("startup backup boundary is unsupported on this platform")
 }
 #[cfg(windows)]
 fn same_directory(a: &Path, b: &Path) -> Result<bool> {
