@@ -171,7 +171,10 @@ fn startup_backup_refuses_bad_sources_or_existing_destinations_without_creating_
         if damage == "orphan" {
             std::fs::write(state.join("game.db-wal"), b"uncheckpointed-progress").unwrap();
         } else {
-            drop(Store::open(&path, &content).unwrap());
+            let baseline = root.join("baseline.db");
+            let store = Store::open(&baseline, &content).unwrap();
+            snapshot(&baseline, &path, &content).unwrap();
+            drop(store);
             match damage {
                 "corrupt" => std::fs::write(&path, b"not SQLite").unwrap(),
                 "unsupported" => Connection::open(&path)
@@ -201,13 +204,21 @@ fn startup_backup_refuses_bad_sources_or_existing_destinations_without_creating_
                 _ => {}
             }
         }
-        let before = std::fs::read(&path).ok();
+        let before = std::fs::read(&path)
+            .ok()
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
         let lock = StateLock::acquire(&state).unwrap();
         assert!(
             pre_migration_backup(&state, &backup, &content, &lock).is_err(),
             "{damage}"
         );
-        assert_eq!(std::fs::read(&path).ok(), before);
+        assert_eq!(
+            std::fs::read(&path)
+                .ok()
+                .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+            before,
+            "{damage}"
+        );
         if damage != "ack-existing" && damage != "ack-symlink" {
             assert!(!ack.exists());
         }
