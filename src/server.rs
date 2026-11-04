@@ -3222,7 +3222,7 @@ pub(crate) async fn persistence_tick(a: &App) -> Result<()> {
     }
     Ok(())
 }
-fn client_assets(client: &std::path::Path) -> Router<App> {
+fn client_assets(a: &App, client: &std::path::Path) -> Router<App> {
     let mut router = Router::new();
     for (route, file) in [
         ("/", "index.html"),
@@ -3236,13 +3236,16 @@ fn client_assets(client: &std::path::Path) -> Router<App> {
             tower_http::services::ServeFile::new(client.join(file)),
         );
     }
-    router.nest_service(
-        "/vendor",
-        tower_http::services::ServeDir::new(client.join("vendor")),
-    )
+    router
+        .nest_service(
+            "/vendor",
+            tower_http::services::ServeDir::new(client.join("vendor")),
+        )
+        .nest_service("/sfx", tower_http::services::ServeDir::new(a.sfx.clone()))
+        .route("/client.swf", get(swf))
 }
 
-fn routes(a: &App, client: PathBuf) -> Router {
+fn routes(a: &App, client: PathBuf, desktop: bool, client_generation: Option<&str>) -> Router {
     let drops = axum::body::Bytes::from(
         serde_json::to_vec(&crate::loot::catalogue::snapshot(
             &a.content,
@@ -3269,8 +3272,6 @@ fn routes(a: &App, client: PathBuf) -> Router {
         .route("/legacy-api/account/{operation}", post(account_request))
         .route("/legacy-api/fame/list", post(legends))
         .route("/legacy-api/guild/{operation}", post(guilds::request))
-        .nest_service("/sfx", tower_http::services::ServeDir::new(a.sfx.clone()))
-        .route("/client.swf", get(swf))
         .route("/game", get(websocket))
         .route(
             "/api/diagnostics/{key}",
@@ -3334,7 +3335,8 @@ fn routes(a: &App, client: PathBuf) -> Router {
         .route("/internal/discord/recover", post(discord_recover))
         .route("/api/account/recover", post(reset_password))
         .route("/api/account/verify-email", post(email::confirm));
-    app.route("/dev/testing", post(testing::command))
+    let app = app
+        .route("/dev/testing", post(testing::command))
         .route("/dev/join", post(bot_create))
         .route("/dev/action", post(bot_action))
         .route("/dev/trade", post(bot_trade))
@@ -3378,14 +3380,29 @@ fn routes(a: &App, client: PathBuf) -> Router {
             "/internal/discord/critical-incident",
             get(critical_incident),
         )
-        .merge(client_assets(&client))
+        .merge(desktop_http::namespace(
+            client_assets(a, &client),
+            client_generation,
+        ))
         .layer(DefaultBodyLimit::max(1_048_576))
-        .with_state(a.clone())
+        .with_state(a.clone());
+    if desktop {
+        app.layer(axum::middleware::from_fn(desktop_http::fresh))
+    } else {
+        app
+    }
 }
 
 mod desktop;
+mod desktop_http;
 
-pub async fn serve(a: App, bind: SocketAddr, client: PathBuf, desktop: bool) -> Result<()> {
+pub async fn serve(
+    a: App,
+    bind: SocketAddr,
+    client: PathBuf,
+    desktop: bool,
+    client_generation: Option<String>,
+) -> Result<()> {
     crate::audit::record(
         "start",
         serde_json::json!({"revision":a.diagnostics.source_revision,"binary_sha256":a.diagnostics.binary_sha256,"prepared":a.testing.is_some()}),
@@ -3433,11 +3450,12 @@ pub async fn serve(a: App, bind: SocketAddr, client: PathBuf, desktop: bool) -> 
     if a.shore_bots {
         crate::bots::start(&a).await?;
     }
-    let app = routes(&a, client);
+    let entry = desktop_http::entry(client_generation.as_deref());
+    let app = routes(&a, client, desktop, client_generation.as_deref());
     tracing::info!(address=%bind,origin=%a.origin,max_players=a.max_players,behind_proxy=a.behind_proxy,"game frontdoor listening");
     if !a.behind_proxy {
         eprintln!(
-            "\nLocal server ready. Open: http://{bind}/\nLogs: the terminal and .local/server.log\n"
+            "\nLocal server ready. Open: http://{bind}{entry}\nLogs: the terminal and .local/server.log\n"
         );
     }
     let shutdown = a.clone();

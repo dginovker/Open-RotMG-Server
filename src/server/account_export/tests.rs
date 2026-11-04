@@ -10,7 +10,7 @@ const PEER_PASSWORD: &str = "peer-password-canary-8821";
 async fn serve(a: &App) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let router = super::super::routes(a, PathBuf::from("../client"));
+    let router = super::super::routes(a, PathBuf::from("../client"), false, None);
     let server = tokio::spawn(async move {
         axum::serve(
             listener,

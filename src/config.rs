@@ -16,6 +16,8 @@ pub struct Config {
     pub state: PathBuf,
     #[serde(default, deserialize_with = "supplied_backup")]
     pub pre_migration_backup: Option<PathBuf>,
+    #[serde(default, deserialize_with = "supplied_generation")]
+    pub client_generation: Option<String>,
     #[serde(default)]
     pub test_state: bool,
     pub max_players: usize,
@@ -36,6 +38,11 @@ fn supplied_backup<'de, D: serde::Deserializer<'de>>(
     input: D,
 ) -> std::result::Result<Option<PathBuf>, D::Error> {
     PathBuf::deserialize(input).map(Some)
+}
+fn supplied_generation<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    String::deserialize(input).map(Some)
 }
 fn default_realm_count() -> usize {
     2
@@ -143,6 +150,7 @@ impl Config {
                     .join("client"),
                 state: root.join(".local"),
                 pre_migration_backup: None,
+                client_generation: None,
                 test_state: false,
                 max_players: 85,
                 behind_proxy: false,
@@ -191,6 +199,16 @@ impl Config {
         Ok((config, control))
     }
     fn validate(&self, control: bool) -> Result<()> {
+        if let Some(generation) = &self.client_generation {
+            ensure!(self.desktop, "client_generation requires desktop mode");
+            ensure!(
+                generation.len() == 64
+                    && generation
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "client_generation requires exactly 64 lowercase hexadecimal characters from the verified paired build identity"
+            );
+        }
         if let Some(path) = &self.pre_migration_backup {
             ensure!(self.desktop, "pre_migration_backup requires desktop mode");
             ensure!(
@@ -427,6 +445,48 @@ mod startup_backup_tests {
         for value in ["null", "false", "42", "{}"] {
             assert!(
                 serde_json::from_str::<Supplied>(&format!("{{\"pre_migration_backup\":{value}}}"))
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod client_generation_tests {
+    use super::*;
+    #[test]
+    fn client_generation_is_optional_non_null_exact_lower_hex_and_desktop_only() {
+        let (mut config, _) = Config::load(&["--no-shore-bots".into()]).unwrap();
+        assert!(config.client_generation.is_none());
+        config.client_generation = Some("a1".repeat(32));
+        assert!(config.validate(false).is_err());
+        config.desktop = true;
+        config.validate(false).unwrap();
+        for invalid in [
+            "".into(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+            format!("{}/", "a".repeat(64)),
+        ] {
+            config.client_generation = Some(invalid);
+            assert!(config.validate(false).is_err());
+        }
+        #[derive(Deserialize)]
+        struct Supplied {
+            #[serde(default, deserialize_with = "supplied_generation")]
+            client_generation: Option<String>,
+        }
+        assert!(
+            serde_json::from_str::<Supplied>("{}")
+                .unwrap()
+                .client_generation
+                .is_none()
+        );
+        for value in ["null", "false", "42", "{}", "[]"] {
+            assert!(
+                serde_json::from_str::<Supplied>(&format!("{{\"client_generation\":{value}}}"))
                     .is_err()
             );
         }

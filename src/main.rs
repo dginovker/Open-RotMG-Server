@@ -243,5 +243,12 @@ async fn serve(args: Vec<String>, thinking: tokio::runtime::Handle) -> Result<()
         persona_departure_gate: Arc::default(),
         shutdown: tokio::sync::watch::channel(false).0,
     };
-    server::serve(app, config.bind, client, config.desktop).await
+    server::serve(
+        app,
+        config.bind,
+        client,
+        config.desktop,
+        config.client_generation,
+    )
+    .await
 }
