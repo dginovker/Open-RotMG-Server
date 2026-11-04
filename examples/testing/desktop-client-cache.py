@@ -142,6 +142,14 @@ path = client / 'launcher.js'; path.write_bytes(b'SYNTHETIC HTTP FIXTURE B: deli
 os.utime(path, (946684800, 946684800)); assets['launcher.js'] = path.read_bytes()
 second = generation('B'); assert second != first
 run('desktop-qualified-B', True, second, first)
+snapshot = out / 'verified-stopped-game.db'
+for values in [('snapshot', state, repo / 'data', snapshot), ('verify-snapshot', snapshot, repo / 'data')]:
+    command = [str(binary), '--local-save', *map(str, values)]
+    completed = subprocess.run(command, capture_output=True)
+    assert completed.returncode == 0, completed.stderr.decode()
+    value = json.loads(completed.stdout)
+    if values[0] == 'verify-snapshot': assert value['verified'] is True and value['schema'] == 22
+    result.setdefault('current_cli', []).append(dict(operation=values[0], exit=completed.returncode, response=value))
 assert sha(reference.read_bytes()) == reference_sha
 (out / 'desktop-client-cache-result.json').write_text(json.dumps(result, indent=2)+'\n')
 print(json.dumps(result, indent=2))
