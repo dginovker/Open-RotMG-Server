@@ -1,3 +1,6 @@
+mod startup_backup;
+pub(crate) use startup_backup::pre_migration_backup;
+
 use crate::{
     content::Content,
     state_lock::StateLock,

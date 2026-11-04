@@ -22,7 +22,7 @@ mod supervision;
 mod terrain;
 mod wire;
 mod world;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use rand::RngCore;
 use std::sync::Arc;
 
@@ -113,6 +113,16 @@ async fn serve(args: Vec<String>, thinking: tokio::runtime::Handle) -> Result<()
         client.join("client.swf").display()
     );
     let content = Arc::new(content::Content::load(&config.data)?);
+    if let Some(backup) = &config.pre_migration_backup {
+        account_save::pre_migration_backup(
+            &state,
+            backup,
+            &content,
+            STATE_LOCK
+                .get()
+                .context("startup backup requires the desktop state lock")?,
+        )?;
+    }
     let keys = Arc::new(crypto::Keys::load(&state)?);
     let swf = Arc::new(keys.client(&client.join("client.swf"))?);
     if config.test_state {

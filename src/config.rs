@@ -14,6 +14,8 @@ pub struct Config {
     pub data: PathBuf,
     pub client: PathBuf,
     pub state: PathBuf,
+    #[serde(default, deserialize_with = "supplied_backup")]
+    pub pre_migration_backup: Option<PathBuf>,
     #[serde(default)]
     pub test_state: bool,
     pub max_players: usize,
@@ -29,6 +31,11 @@ pub struct Config {
     pub realm_seed: u64,
     #[serde(default = "default_realm_count")]
     pub realm_count: usize,
+}
+fn supplied_backup<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> std::result::Result<Option<PathBuf>, D::Error> {
+    PathBuf::deserialize(input).map(Some)
 }
 fn default_realm_count() -> usize {
     2
@@ -135,6 +142,7 @@ impl Config {
                     .context("workspace parent missing")?
                     .join("client"),
                 state: root.join(".local"),
+                pre_migration_backup: None,
                 test_state: false,
                 max_players: 85,
                 behind_proxy: false,
@@ -183,6 +191,21 @@ impl Config {
         Ok((config, control))
     }
     fn validate(&self, control: bool) -> Result<()> {
+        if let Some(path) = &self.pre_migration_backup {
+            ensure!(self.desktop, "pre_migration_backup requires desktop mode");
+            ensure!(
+                path.is_absolute()
+                    && path.file_name().is_some()
+                    && path
+                        .to_str()
+                        .is_some_and(|s| !s.chars().any(char::is_control))
+                    && path.components().all(|c| !matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )),
+                "pre_migration_backup requires an absolute UTF-8 file path without traversal or controls"
+            );
+        }
         if self.desktop {
             ensure!(
                 !control && !self.test_state && !self.behind_proxy,
@@ -366,5 +389,46 @@ mod desktop_tests {
         config.origin = format!("http://{}", config.bind);
         config.state = "relative".into();
         assert!(config.validate(false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod startup_backup_tests {
+    use super::*;
+    #[test]
+    fn optional_startup_backup_is_strict_and_desktop_only() {
+        let (mut config, _) = Config::load(&["--no-shore-bots".into()]).unwrap();
+        assert!(config.pre_migration_backup.is_none());
+        let path = std::env::temp_dir().join("startup-backup.db");
+        config.pre_migration_backup = Some(path.clone());
+        assert!(config.validate(false).is_err());
+        config.desktop = true;
+        config.validate(false).unwrap();
+        for path in [
+            PathBuf::from("relative.db"),
+            path.join("../other.db"),
+            PathBuf::from("/"),
+            PathBuf::from("/bad\npath.db"),
+        ] {
+            config.pre_migration_backup = Some(path);
+            assert!(config.validate(false).is_err());
+        }
+        #[derive(Deserialize)]
+        struct Supplied {
+            #[serde(default, deserialize_with = "supplied_backup")]
+            pre_migration_backup: Option<PathBuf>,
+        }
+        assert!(
+            serde_json::from_str::<Supplied>("{}")
+                .unwrap()
+                .pre_migration_backup
+                .is_none()
+        );
+        for value in ["null", "false", "42", "{}"] {
+            assert!(
+                serde_json::from_str::<Supplied>(&format!("{{\"pre_migration_backup\":{value}}}"))
+                    .is_err()
+            );
+        }
     }
 }
