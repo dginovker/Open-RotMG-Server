@@ -32,8 +32,11 @@ for name in files:
 assets = {name: (client / name).read_bytes() for name in files}
 assets['sfx/arrowShoot.mp3'] = (repo / 'data/sfx/arrowShoot.mp3').read_bytes()
 state = out / 'state'
+with socket.socket() as probe:
+    probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
+origin = f'http://127.0.0.1:{port}'
 result = dict(binary_sha256=sha(binary.read_bytes()), reference_swf=str(reference), reference_sha256=reference_sha,
-              source_client='synthetic fixture only; no mutable ROOT/client read', cases=[])
+              source_client='synthetic fixture only; no mutable ROOT/client read', origin=origin, cases=[])
 
 def request(port, method, path, headers=None, body=None):
     connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
@@ -54,9 +57,6 @@ def generation(label):
     return sha(raw)
 
 def run(label, desktop, selected=None, old=None):
-    with socket.socket() as probe:
-        probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
-    origin = f'http://127.0.0.1:{port}'
     config = dict(bind=f'127.0.0.1:{port}', origin=origin, data=str(repo / 'data'), client=str(client), state=str(state),
                   max_players=85, behind_proxy=False, shore_bots=False, bot_llm=False, realm_seed=42)
     if selected is not None: config['client_generation'] = selected
