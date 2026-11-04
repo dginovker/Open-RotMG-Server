@@ -241,9 +241,9 @@ async fn desktop_get_head_strip_stale_future_conditions_and_ranges_with_or_witho
                     assert_eq!(
                         bytes.as_ref(),
                         if method == reqwest::Method::HEAD {
-                            b""
+                            b"".as_slice()
                         } else {
-                            &body
+                            body.as_slice()
                         }
                     );
                 }
