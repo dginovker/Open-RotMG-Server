@@ -1599,6 +1599,7 @@ mod native_state_header_tests {
     #[tokio::test]
     async fn registered_actors_without_player_projection_keep_shared_active_header() {
         let (dir, app) = super::super::account_actions::tests::fixture_with_native_control();
+        #[cfg(unix)]
         assert_eq!(
             std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&dir).unwrap().permissions())
                 & 0o777,

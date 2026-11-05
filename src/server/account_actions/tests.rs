@@ -11,6 +11,7 @@ fn fixture_with_control(native: bool) -> (PathBuf, App) {
     std::fs::create_dir(&dir).unwrap();
     let content = Arc::new(Content::load(std::path::Path::new("data")).unwrap());
     let testing = native.then(|| {
+        #[cfg(unix)]
         std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
             .unwrap();
         std::fs::write(
