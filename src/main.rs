@@ -7,6 +7,7 @@ mod condition;
 mod config;
 mod content;
 mod crypto;
+mod desktop_metadata;
 mod dungeon;
 mod encounter;
 mod endgame;
@@ -20,6 +21,8 @@ mod state_lock;
 mod store;
 mod supervision;
 mod terrain;
+#[cfg(windows)]
+mod windows_publication;
 mod wire;
 mod world;
 use anyhow::{Context, Result, ensure};
@@ -31,6 +34,9 @@ static STATE_LOCK: std::sync::OnceLock<state_lock::StateLock> = std::sync::OnceL
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if desktop_metadata::run(&args)? {
+        return Ok(());
+    }
     if terrain::prepare::run(&args)? {
         return Ok(());
     }

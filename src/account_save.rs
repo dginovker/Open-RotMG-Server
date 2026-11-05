@@ -62,26 +62,12 @@ fn sync_staging(file: &File, operation: &str) -> Result<()> {
 }
 #[cfg(windows)]
 fn publish_distinct(staging: &Path, destination: &Path) -> Result<bool> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
-    }
     ensure!(
         staging.parent() == destination.parent(),
         "durable publication requires same-parent staging"
     );
-    let source: Vec<u16> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    // WRITE_THROUGH waits for the move on disk; neither replacement nor cross-volume copy is allowed.
-    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 8) } == 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("durable distinct Windows publication");
-    }
+    crate::windows_publication::publish(staging, destination, false)
+        .context("durable distinct Windows publication")?;
     Ok(true)
 }
 #[cfg(not(windows))]
