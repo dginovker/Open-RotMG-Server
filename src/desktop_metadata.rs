@@ -145,7 +145,6 @@ fn parse(args: &[String]) -> Result<Request> {
     let root = &args[2];
     ensure!(
         Path::new(root).is_absolute()
-            && root.len() <= 4096
             && !root.chars().any(char::is_control)
             && Path::new(root).components().all(|c| !matches!(
                 c,

@@ -24,6 +24,14 @@ fn args(root: &Path, operation: &str, source: Option<&str>, destination: &str) -
 #[test]
 fn desktop_metadata_exact_roles_and_strict_wire() {
     let root = root();
+    let unicode = root.join("ordinary-树-🌙");
+    let request = parse(&args(&unicode, "create-container", None, "runtimes")).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&acknowledgement(&request).unwrap()).unwrap();
+    assert_eq!(value["root"], unicode.to_str().unwrap());
+    let oversized = root.join("z".repeat(MAX_ACK));
+    let request = parse(&args(&oversized, "create-container", None, "runtimes")).unwrap();
+    assert!(acknowledgement(&request).is_err());
     let hash = "a".repeat(64);
     for destination in [
         "runtime-profile.json".into(),
