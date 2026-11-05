@@ -15,7 +15,7 @@ args = parser.parse_args()
 assert sys.platform == 'win32', 'This case must execute the actual Win32 producer'
 binary = args.binary.resolve()
 out = Path(os.environ['QA_RESULTS_DIR'])
-root = out / 'existing-private-metadata-root'; root.mkdir()
+root = out / 'existing-private-metadata-树-🌙'; root.mkdir()
 (root / 'game.db').write_bytes(b'SYNTHETIC_PROGRESS_CANARY')
 records = []
 
