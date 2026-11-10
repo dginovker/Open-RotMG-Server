@@ -67,6 +67,7 @@ async fn fatal_world_and_persistence_workers_stop_real_server_and_preserve_incid
                 "127.0.0.1:0".parse().unwrap(),
                 "data".into(),
                 false,
+                None,
             )
             .await
         });

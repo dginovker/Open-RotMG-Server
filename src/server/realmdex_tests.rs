@@ -26,7 +26,7 @@ async fn realmdex_counts_only_live_humans_across_worlds_and_reports_failure() {
     app.world.clock.set_paused(true);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let router = routes(&app, dir.join("client"));
+    let router = routes(&app, dir.join("client"), false, None);
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });

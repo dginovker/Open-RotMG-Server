@@ -7,6 +7,7 @@ mod condition;
 mod config;
 mod content;
 mod crypto;
+mod desktop_metadata;
 mod dungeon;
 mod encounter;
 mod endgame;
@@ -20,9 +21,11 @@ mod state_lock;
 mod store;
 mod supervision;
 mod terrain;
+#[cfg(windows)]
+mod windows_publication;
 mod wire;
 mod world;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use rand::RngCore;
 use std::sync::Arc;
 
@@ -31,6 +34,9 @@ static STATE_LOCK: std::sync::OnceLock<state_lock::StateLock> = std::sync::OnceL
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if desktop_metadata::run(&args)? {
+        return Ok(());
+    }
     if terrain::prepare::run(&args)? {
         return Ok(());
     }
@@ -119,6 +125,16 @@ async fn serve(args: Vec<String>, thinking: tokio::runtime::Handle) -> Result<()
         tracing::info!(path=%path.display(), decisions=content.reviewed_accounts.len(), "server reviewed account decisions loaded");
     }
     let content = Arc::new(content);
+    if let Some(backup) = &config.pre_migration_backup {
+        account_save::pre_migration_backup(
+            &state,
+            backup,
+            &content,
+            STATE_LOCK
+                .get()
+                .context("startup backup requires the desktop state lock")?,
+        )?;
+    }
     let keys = Arc::new(crypto::Keys::load(&state)?);
     let swf = Arc::new(keys.client(&client.join("client.swf"))?);
     if config.test_state {
@@ -239,5 +255,12 @@ async fn serve(args: Vec<String>, thinking: tokio::runtime::Handle) -> Result<()
         persona_departure_gate: Arc::default(),
         shutdown: tokio::sync::watch::channel(false).0,
     };
-    server::serve(app, config.bind, client, config.desktop).await
+    server::serve(
+        app,
+        config.bind,
+        client,
+        config.desktop,
+        config.client_generation,
+    )
+    .await
 }
