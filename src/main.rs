@@ -109,8 +109,24 @@ async fn serve(args: Vec<String>, thinking: tokio::runtime::Handle) -> Result<()
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     }
-    let lag = lag_log::open(&state)?;
-    lag_log::observe_host(state.clone())?;
+    let operational = match &config.operational_state {
+        Some(path) => {
+            std::fs::create_dir_all(path)?;
+            ensure!(
+                !std::fs::symlink_metadata(path)?.file_type().is_symlink(),
+                "operational state directory must not be linked"
+            );
+            path.clone()
+        }
+        None => state.clone(),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&operational, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let lag = lag_log::open(&operational)?;
+    lag_log::observe_host(operational.clone())?;
     tracing::info!(directory=%lag.display(), "lag log opened");
     validate_client_assets(&client)?;
     ensure!(
@@ -135,7 +151,7 @@ async fn serve(args: Vec<String>, thinking: tokio::runtime::Handle) -> Result<()
                 .context("startup backup requires the desktop state lock")?,
         )?;
     }
-    let keys = Arc::new(crypto::Keys::load(&state)?);
+    let keys = Arc::new(crypto::Keys::load(&operational)?);
     let swf = Arc::new(keys.client(&client.join("client.swf"))?);
     if config.test_state {
         ensure!(
@@ -160,8 +176,10 @@ async fn serve(args: Vec<String>, thinking: tokio::runtime::Handle) -> Result<()
         "prepared sessions require --no-shore-bots or shore_bots:false; spawn every controller explicitly"
     );
     let store = store::Store::open(&state.join("game.db"), &content)?;
-    let supervisor =
-        supervision::Supervisor::recovered(state.join("last-critical-incident.json"), &store)?;
+    let supervisor = supervision::Supervisor::recovered(
+        operational.join("last-critical-incident.json"),
+        &store,
+    )?;
     let directory = match &testing {
         Some(_) => world::Directory::prepared(
             &config.data,
@@ -207,7 +225,7 @@ async fn serve(args: Vec<String>, thinking: tokio::runtime::Handle) -> Result<()
         thinking,
         testing,
         diagnostics: Arc::new(server::diagnostics::Diagnostics::open(
-            state.join("bug-reports"),
+            operational.join("bug-reports"),
         )?),
         store,
         world,

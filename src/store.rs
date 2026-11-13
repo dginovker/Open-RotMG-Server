@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 mod account_actions;
 pub(crate) mod account_save;
 mod accounts;
+pub(crate) mod local_accounts;
 pub(crate) use accounts::email as validate_email;
 pub(crate) mod browser_link;
 mod character_slots;

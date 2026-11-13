@@ -15,6 +15,8 @@ pub struct Config {
     pub client: PathBuf,
     pub state: PathBuf,
     #[serde(default, deserialize_with = "supplied_backup")]
+    pub operational_state: Option<PathBuf>,
+    #[serde(default, deserialize_with = "supplied_backup")]
     pub pre_migration_backup: Option<PathBuf>,
     #[serde(default, deserialize_with = "supplied_generation")]
     pub client_generation: Option<String>,
@@ -149,6 +151,7 @@ impl Config {
                     .context("workspace parent missing")?
                     .join("client"),
                 state: root.join(".local"),
+                operational_state: None,
                 pre_migration_backup: None,
                 client_generation: None,
                 test_state: false,
@@ -199,6 +202,21 @@ impl Config {
         Ok((config, control))
     }
     fn validate(&self, control: bool) -> Result<()> {
+        if let Some(path) = &self.operational_state {
+            ensure!(
+                self.desktop
+                    && path.is_absolute()
+                    && path != &self.state
+                    && path
+                        .to_str()
+                        .is_some_and(|s| !s.chars().any(char::is_control))
+                    && path.components().all(|c| !matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )),
+                "operational_state requires a distinct absolute desktop-only directory without traversal"
+            );
+        }
         if let Some(generation) = &self.client_generation {
             ensure!(self.desktop, "client_generation requires desktop mode");
             ensure!(
@@ -416,6 +434,19 @@ mod desktop_tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn separate_operational_state_is_explicit_distinct_and_desktop_only() {
+        let (mut config, _) = Config::load(&["--no-shore-bots".into()]).unwrap();
+        assert!(config.operational_state.is_none());
+        config.operational_state = Some(std::env::temp_dir().join("offline-server-state"));
+        assert!(config.validate(false).is_err());
+        config.desktop = true;
+        config.validate(false).unwrap();
+        config.operational_state = Some(config.state.clone());
+        assert!(config.validate(false).is_err());
+        config.operational_state = Some("relative".into());
+        assert!(config.validate(false).is_err());
+    }
     #[test]
     fn desktop_rejects_proxy_public_origin_and_relative_runtime_paths() {
         let (mut config, _) = Config::load(&["--no-shore-bots".into()]).unwrap();

@@ -1,3 +1,4 @@
+mod accounts;
 mod startup_backup;
 pub(crate) use startup_backup::pre_migration_backup;
 
@@ -228,6 +229,8 @@ pub(crate) async fn run(args: &[String]) -> Result<bool> {
         return Ok(false);
     }
     let operation = match args.get(1).map(String::as_str) {
+        Some("accounts") => "accounts",
+        Some("account-edit") => "account-edit",
         Some("import") => "import",
         Some("replace") => "replace",
         Some("restore") => "restore",
@@ -269,6 +272,15 @@ pub(crate) async fn run(args: &[String]) -> Result<bool> {
 async fn execute(args: &[String], phase: &mut Phase) -> Result<()> {
     let args: Vec<_> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
+        [_, "accounts", state, data] => {
+            accounts::run(Path::new(state), Path::new(data), None, phase)?
+        }
+        [_, "account-edit", state, data, backup] => accounts::run(
+            Path::new(state),
+            Path::new(data),
+            Some(Path::new(backup)),
+            phase,
+        )?,
         [_, "verify-account", file, data] => {
             phase.stage("Account input/content validation failed; correct the file or password and re-preview before retry.");
             let (saved, _) = read_save(Path::new(file))?;
@@ -426,8 +438,14 @@ async fn execute(args: &[String], phase: &mut Phase) -> Result<()> {
             phase.mutating("Account import/replacement failed after destination database activation; outcome unknown. Do not retry automatically.");
             let store = Store::open(&db, &content)?;
             let result = store
-                .import_expected_account_save(save, password, *operation == "replace", expectation)
+                .import_expected_account_save(
+                    save,
+                    password.clone(),
+                    *operation == "replace",
+                    expectation,
+                )
                 .await?;
+            accounts::remember_import(state, result.account, password)?;
             phase.emit(&result)?;
         }
         [_, "import" | "replace", ..] => anyhow::bail!(
