@@ -19,7 +19,7 @@ pub(crate) struct LocalAccountEdit {
     pub account: i32,
     pub expected: String,
     pub username: String,
-    pub password: String,
+    pub password: Option<String>,
 }
 fn expectation(account: i32, username: &Option<String>, hash: &Option<String>) -> Result<String> {
     Ok(format!(
@@ -77,7 +77,9 @@ pub(crate) fn validate_local_edit(edit: &LocalAccountEdit) -> Result<String> {
             && edit.expected.bytes().all(|b| b.is_ascii_hexdigit()),
         "invalid account expectation"
     );
-    accounts::password(&edit.password)?;
+    if let Some(password) = &edit.password {
+        accounts::password(password)?;
+    }
     accounts::email(&edit.username)
 }
 pub(crate) fn edit_local_account(
@@ -96,7 +98,10 @@ pub(crate) fn edit_local_account(
         |r| r.get(0),
     )?;
     ensure!(!taken, "username belongs to another local account");
-    let verifier = accounts::hash(&edit.password)?;
+    let verifier = match &edit.password {
+        Some(password) => accounts::hash(password)?,
+        None => old_hash.context("guest account requires a password")?,
+    };
     tx.execute("INSERT INTO credentials(account,email,password_hash) VALUES(?1,?2,?3) ON CONFLICT(account) DO UPDATE SET email=excluded.email,password_hash=excluded.password_hash", params![edit.account, username, verifier])?;
     for table in [
         "password_resets",

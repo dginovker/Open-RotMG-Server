@@ -18,7 +18,7 @@ fn local_edits_keep_other_accounts_and_progress_and_reject_stale_or_duplicate_na
         account: 1,
         expected: first[0].expected.clone(),
         username: "New@local.invalid".into(),
-        password: "private-local-password".into(),
+        password: Some("private-local-password".into()),
     };
     let tx = db.transaction().unwrap();
     edit_local_account(&tx, &edit).unwrap();
@@ -30,11 +30,13 @@ fn local_edits_keep_other_accounts_and_progress_and_reject_stale_or_duplicate_na
             |r| r.get(0),
         )
         .unwrap();
-    let passwords =
-        std::collections::BTreeMap::from([(password_key(&verifier), edit.password.clone())]);
+    let passwords = std::collections::BTreeMap::from([(
+        password_key(&verifier),
+        edit.password.clone().unwrap(),
+    )]);
     let listed = local_accounts(&db, &passwords).unwrap();
     assert_eq!(listed[0].username.as_deref(), Some("new@local.invalid"));
-    assert_eq!(listed[0].password.as_deref(), Some(edit.password.as_str()));
+    assert_eq!(listed[0].password.as_deref(), edit.password.as_deref());
     assert!(listed[1].username.is_none());
     let tx = db.transaction().unwrap();
     assert!(edit_local_account(&tx, &edit).is_err());
@@ -46,7 +48,7 @@ fn local_edits_keep_other_accounts_and_progress_and_reject_stale_or_duplicate_na
     drop(tx);
     edit.account = 1;
     edit.expected = listed[0].expected.clone();
-    edit.password = "another-local-password".into();
+    edit.password = Some("another-local-password".into());
     let tx = db.transaction().unwrap();
     edit_local_account(&tx, &edit).unwrap();
     tx.commit().unwrap();
@@ -66,9 +68,31 @@ fn local_edits_keep_other_accounts_and_progress_and_reject_stale_or_duplicate_na
             .unwrap(),
         "guest1"
     );
-    edit.password = "tiny".into();
+    edit.password = None;
+    edit.username = "renamed@local.invalid".into();
+    edit.expected = local_accounts(&db, &passwords).unwrap()[0].expected.clone();
+    let before: String = db
+        .query_row(
+            "SELECT password_hash FROM credentials WHERE account=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let tx = db.transaction().unwrap();
+    edit_local_account(&tx, &edit).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        before,
+        db.query_row(
+            "SELECT password_hash FROM credentials WHERE account=1",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap()
+    );
+    edit.password = Some("tiny".into());
     assert!(validate_local_edit(&edit).is_err());
-    edit.password = "valid-password".into();
+    edit.password = Some("valid-password".into());
     edit.username = "not-an-email".into();
     assert!(validate_local_edit(&edit).is_err());
 }

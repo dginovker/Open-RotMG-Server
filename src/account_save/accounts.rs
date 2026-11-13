@@ -102,8 +102,10 @@ pub(super) fn run(
             [edit.account],
             |r| r.get(0),
         )?;
-        saved.insert(password_key(&verifier), edit.password);
-        remember(state, &saved)?;
+        if let Some(password) = edit.password {
+            saved.insert(password_key(&verifier), password);
+            remember(state, &saved)?;
+        }
         phase.mutating("Account edit completion is unknown. Keep the save and backup; do not repeat the edit automatically.");
         tx.commit()?;
     }
