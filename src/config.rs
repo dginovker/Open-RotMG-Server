@@ -247,10 +247,7 @@ impl Config {
                 !control && !self.test_state && !self.behind_proxy,
                 "--desktop forbids development control, prepared state and proxy hosting"
             );
-            ensure!(
-                !self.shore_bots && !self.bot_llm,
-                "--desktop requires shore_bots:false and bot_llm:false"
-            );
+            ensure!(!self.bot_llm, "--desktop requires bot_llm:false");
             ensure!(
                 self.origin == format!("http://{}", self.bind),
                 "--desktop origin must match the loopback HTTP bind address"
@@ -424,8 +421,12 @@ mod desktop_tests {
             "--config".into(),
             path.to_str().unwrap().into(),
         ];
-        let (config, control) = Config::load(&args).unwrap();
+        let (mut config, control) = Config::load(&args).unwrap();
         assert!(config.desktop && !control && !config.shore_bots && !config.bot_llm);
+        config.shore_bots = true;
+        config.validate(false).unwrap();
+        config.bot_llm = true;
+        assert!(config.validate(false).is_err());
         for flag in ["--dev-control", "--shore-bots", "--bot-llm"] {
             let mut invalid = args.clone();
             invalid.push(flag.into());

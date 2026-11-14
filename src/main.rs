@@ -103,6 +103,7 @@ async fn serve(args: Vec<String>, thinking: tokio::runtime::Handle) -> Result<()
             .set(state_lock::StateLock::acquire(&state)?)
             .map_err(|_| anyhow::anyhow!("desktop state lock already initialized"))?;
         tracing::info!(state=%state.display(), "desktop state lock acquired");
+        account_save::forget_passwords(&state)?;
     }
     #[cfg(unix)]
     {

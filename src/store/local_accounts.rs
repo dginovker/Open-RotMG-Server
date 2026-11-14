@@ -1,8 +1,6 @@
 use super::*;
-use anyhow::bail;
 #[cfg(test)]
 mod tests;
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use sha2::{Digest, Sha256};
 
 #[derive(serde::Serialize)]
@@ -10,7 +8,6 @@ pub(crate) struct LocalAccount {
     pub account: i32,
     pub name: String,
     pub username: Option<String>,
-    pub password: Option<String>,
     pub expected: String,
 }
 #[derive(serde::Deserialize)]
@@ -27,13 +24,7 @@ fn expectation(account: i32, username: &Option<String>, hash: &Option<String>) -
         Sha256::digest(serde_json::to_vec(&(account, username, hash))?)
     ))
 }
-pub(crate) fn password_key(verifier: &str) -> String {
-    format!("{:x}", Sha256::digest(verifier.as_bytes()))
-}
-pub(crate) fn local_accounts(
-    db: &Connection,
-    passwords: &std::collections::BTreeMap<String, String>,
-) -> Result<Vec<LocalAccount>> {
+pub(crate) fn local_accounts(db: &Connection) -> Result<Vec<LocalAccount>> {
     let mut query = db.prepare("SELECT a.id,a.name,c.email,c.password_hash FROM accounts a LEFT JOIN credentials c ON c.account=a.id ORDER BY a.id")?;
     let rows = query.query_map([], |r| {
         Ok((
@@ -45,27 +36,11 @@ pub(crate) fn local_accounts(
     })?;
     rows.map(|row| {
         let (account, name, username, hash) = row?;
-        let password = match (
-            hash.as_ref().and_then(|h| passwords.get(&password_key(h))),
-            &hash,
-        ) {
-            (Some(clear), Some(verifier)) => {
-                let parsed = PasswordHash::new(verifier)
-                    .map_err(|_| anyhow::anyhow!("invalid local password verifier"))?;
-                match Argon2::default().verify_password(clear.as_bytes(), &parsed) {
-                    Ok(()) => Some(clear.clone()),
-                    Err(argon2::password_hash::Error::Password) => None,
-                    Err(_) => bail!("local password verification failed"),
-                }
-            }
-            _ => None,
-        };
         Ok(LocalAccount {
             account,
             name,
             expected: expectation(account, &username, &hash)?,
             username,
-            password,
         })
     })
     .collect()

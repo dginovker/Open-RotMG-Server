@@ -7,13 +7,8 @@ fn fixture() -> Connection {
 #[test]
 fn local_edits_keep_other_accounts_and_progress_and_reject_stale_or_duplicate_names() {
     let mut db = fixture();
-    let empty = std::collections::BTreeMap::new();
-    let first = local_accounts(&db, &empty).unwrap();
-    assert!(
-        first
-            .iter()
-            .all(|a| a.password.is_none() && a.username.is_none())
-    );
+    let first = local_accounts(&db).unwrap();
+    assert!(first.iter().all(|a| a.username.is_none()));
     let mut edit = LocalAccountEdit {
         account: 1,
         expected: first[0].expected.clone(),
@@ -30,13 +25,11 @@ fn local_edits_keep_other_accounts_and_progress_and_reject_stale_or_duplicate_na
             |r| r.get(0),
         )
         .unwrap();
-    let passwords = std::collections::BTreeMap::from([(
-        password_key(&verifier),
-        edit.password.clone().unwrap(),
-    )]);
-    let listed = local_accounts(&db, &passwords).unwrap();
+    assert!(verifier.starts_with("$argon2id$"));
+    let listed = local_accounts(&db).unwrap();
     assert_eq!(listed[0].username.as_deref(), Some("new@local.invalid"));
-    assert_eq!(listed[0].password.as_deref(), edit.password.as_deref());
+    let output = serde_json::to_string(&listed).unwrap();
+    assert!(!output.contains("password") && !output.contains(&verifier));
     assert!(listed[1].username.is_none());
     let tx = db.transaction().unwrap();
     assert!(edit_local_account(&tx, &edit).is_err());
@@ -52,11 +45,15 @@ fn local_edits_keep_other_accounts_and_progress_and_reject_stale_or_duplicate_na
     let tx = db.transaction().unwrap();
     edit_local_account(&tx, &edit).unwrap();
     tx.commit().unwrap();
-    assert!(
-        local_accounts(&db, &passwords).unwrap()[0]
-            .password
-            .is_none()
-    );
+    let changed: String = db
+        .query_row(
+            "SELECT password_hash FROM credentials WHERE account=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(changed, verifier);
+    assert!(changed.starts_with("$argon2id$"));
     assert_eq!(
         db.query_row("SELECT sum(hp) FROM characters", [], |r| r.get::<_, i32>(0))
             .unwrap(),
@@ -70,7 +67,7 @@ fn local_edits_keep_other_accounts_and_progress_and_reject_stale_or_duplicate_na
     );
     edit.password = None;
     edit.username = "renamed@local.invalid".into();
-    edit.expected = local_accounts(&db, &passwords).unwrap()[0].expected.clone();
+    edit.expected = local_accounts(&db).unwrap()[0].expected.clone();
     let before: String = db
         .query_row(
             "SELECT password_hash FROM credentials WHERE account=1",

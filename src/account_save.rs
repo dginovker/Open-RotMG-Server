@@ -1,4 +1,5 @@
 mod accounts;
+pub(crate) use accounts::forget_passwords;
 mod startup_backup;
 pub(crate) use startup_backup::pre_migration_backup;
 
@@ -445,7 +446,7 @@ async fn execute(args: &[String], phase: &mut Phase) -> Result<()> {
                     expectation,
                 )
                 .await?;
-            accounts::remember_import(state, result.account, password)?;
+            accounts::forget_passwords(state)?;
             phase.emit(&result)?;
         }
         [_, "import" | "replace", ..] => anyhow::bail!(
