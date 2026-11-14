@@ -164,7 +164,8 @@ pub(super) fn can_fight(
     let shared_ready = events::shared(&v.map.name) && events::equipped(v, content);
     damage - v.character.stats[3]
         <= (v.character.stats[0] as f32 * if shared_ready { 0.65 } else { 0.4 }) as i32
-        && (enemy.max_hp <= v.character.stats[0] * 50 || shared_ready)
+        // Realm events are crowd fights nobody solos; refusing them left bots shooting only minions.
+        && (enemy.max_hp <= v.character.stats[0] * 50 || shared_ready || definition.encounter)
         && (!events::shared(&v.map.name)
             || !matches!(
                 enemy.kind,

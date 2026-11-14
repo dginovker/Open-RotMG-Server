@@ -1056,3 +1056,54 @@ fn a_venture_trip_ends_at_its_destination() {
     assert_eq!(d.goal, Goal::Venture);
     assert!(d.movement.is_some_and(|m| m.x > 66.), "{:?}", d.movement);
 }
+
+#[test]
+fn level_20s_shoot_realm_event_bosses_and_back_off_out_of_reach() {
+    let (c, mut v) = fixture();
+    v.character.level = 20;
+    v.character.stats[0] = 700;
+    v.character.hp = 700;
+    v.character.stats[3] = 25;
+    v.objects[0].position = Pos { x: 10.5, y: 17.5 };
+    v.objects.push(VisibleObject {
+        id: 3,
+        account: None,
+        kind: 0xd5a,
+        name: "Cube Overseer".into(),
+        position: Pos { x: 13.5, y: 12.5 },
+        hp: 1500,
+        max_hp: 1500,
+        level: None,
+        equipped: vec![],
+        contents: vec![],
+        blocks: false,
+        usable: false,
+        condition_mask: Some(0),
+    });
+    // Cube God, Grand Sphinx, Lord of the Lost Lands.
+    for (kind, hp) in [(0xd59, 10000), (0xd54, 55000), (0xd50, 70000)] {
+        (v.objects[0].kind, v.objects[0].hp, v.objects[0].max_hp) = (kind, hp, hp);
+        let d = Brain::new(ARCHETYPES[1], &v).decide(&v, &c).unwrap();
+        assert_eq!(d.goal, Goal::Fight(2), "{kind:#x}");
+        assert!(
+            d.aim.unwrap().distance(v.objects[0].position) < 3.,
+            "{kind:#x}"
+        );
+    }
+    // A wounded Knight out of sword reach keeps backing off until no enemy presses it.
+    v.objects.truncate(1);
+    v.character.class = 0x031e;
+    v.character.items[..3].copy_from_slice(&[0xa82, -1, -1]);
+    v.character.hp = 300;
+    let mut brain = Brain::new(ARCHETYPES[1], &v);
+    for _ in 0..40 {
+        let d = brain.decide(&v, &c).unwrap();
+        if d.goal != Goal::Recover {
+            break;
+        }
+        v.position = d.movement.expect("a recovering player keeps moving");
+        brain.goal = d.goal;
+        (v.tick, v.time_ms, v.elapsed_ms) = (v.tick + 1, v.time_ms + 50, v.elapsed_ms + 50);
+    }
+    assert!(v.position.distance(v.objects[0].position) > 15.);
+}

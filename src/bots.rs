@@ -1462,7 +1462,8 @@ impl Brain {
                     Goal::Remedy(remedy.expect("emergency remedy").id)
                 };
             }
-            if emergency && pressured {
+            // Live: wounded melee bots stood still beside a Cube God for 15 minutes, never out of reach or in range.
+            if retreat || remedy.is_some() && pressured {
                 let focus = if retreat {
                     nearest.map(|e| e.position)
                 } else if let Some(blue) = remedy {
@@ -1659,6 +1660,12 @@ impl Brain {
                         || v.quest == Some(enemy.id))
                 {
                     60. + (enemy.max_hp as f32).sqrt().min(20.)
+                } else {
+                    0.
+                }
+                // Live: bots at a Cube God shot its Overseers for minutes; the chosen quest is the fight.
+                + if d < range && realm_quest == Some(Goal::Hunt(enemy.id)) {
+                    30.
                 } else {
                     0.
                 };

@@ -447,7 +447,8 @@ pub(super) fn movement(
             .map(|e| point.distance(e.position))
             .fold(20., f32::min);
         let spacing = if retreat {
-            separation.min(12.) * 3.
+            // Beyond the 15-tile pressed radius, so a recovering player leaves Recover and resumes its plan.
+            separation.min(16.) * 3.
         } else {
             target.map_or(0., |(p, range)| {
                 -(point.distance(p) - range * 0.8).abs() * 3.
