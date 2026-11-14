@@ -95,7 +95,6 @@ async fn saved(response: reqwest::Response) -> crate::store::account_save::Accou
     let bytes = response.bytes().await.unwrap();
     assert!(bytes.len() as u64 <= crate::store::account_save::MAX_BYTES);
     for secret in [
-        EMAIL,
         PASSWORD,
         PEER_PASSWORD,
         GUID,
@@ -250,6 +249,7 @@ async fn account_export_http_strict_auth_privacy_readonly_and_account_isolation(
     .await;
     let own = saved(export(&url).await).await;
     assert_eq!(own.origin.account, account);
+    assert_eq!(own.email.as_deref(),Some(EMAIL));
     assert_eq!(own.characters.len(), 1);
     assert_eq!(own.characters[0].character.id, ch.id);
     let other = saved(
@@ -263,6 +263,7 @@ async fn account_export_http_strict_auth_privacy_readonly_and_account_isolation(
     )
     .await;
     assert_eq!(other.origin.account, peer);
+    assert_eq!(other.email.as_deref(),Some("peer-export@example.invalid"));
     assert_eq!(other.characters[0].character.id, peerch.id);
     assert_eq!(dump(&db), before);
     assert_eq!(std::fs::read(dir.join("game.db")).unwrap(), main_before);

@@ -128,7 +128,6 @@ async fn account_save_complete_linked_human_roundtrip_privacy_auth_and_future_ea
     for canary in [
         "PRIVATE_",
         "BACKUP_FIXTURE_SECRET",
-        "example.invalid",
         "backup-fixture-password",
         "password_hash",
         "discord_id",
@@ -362,7 +361,7 @@ async fn account_save_unknown_future_corrupt_collision_and_rollback() {
     let account = local
         .register(
             "collision".into(),
-            "player-2@local.invalid".into(),
+            "backup-false@example.invalid".into(),
             "collision-password".into(),
         )
         .await
@@ -809,7 +808,7 @@ async fn account_save_process_cuts_are_atomic_for_import_and_replacement() {
             } else {
                 assert_eq!(
                     reopened
-                        .authenticate("player-2@local.invalid".into(), "cut-password".into())
+                        .authenticate("backup-false@example.invalid".into(), "cut-password".into())
                         .await
                         .unwrap(),
                     2
@@ -1235,9 +1234,9 @@ async fn account_save_schema21_preview_readonly_login_and_collision_checks() {
     assert!(crate::account_save::run(&args).await.unwrap());
     assert_eq!(dump(&db), before);
     let plan = preview(&db, &save).unwrap();
-    assert_eq!(plan.login, "player-2@local.invalid");
+    assert_eq!(plan.login, "backup-false@example.invalid");
     assert!(!plan.replaced);
-    db.execute("UPDATE credentials SET email='player-2@local.invalid'", [])
+    db.execute("UPDATE credentials SET email='backup-false@example.invalid'", [])
         .unwrap();
     let before = dump(&db);
     assert!(crate::account_save::run(&args).await.is_err());
@@ -1456,7 +1455,7 @@ async fn account_save_cli_preview_metadata_expected_and_snapshot_counts_preserve
     assert_eq!(preview["exported_at"], save.exported_at);
     assert_eq!(preview["name"], save.name);
     assert_eq!(preview["character_count"], save.characters.len());
-    assert_eq!(preview["login"], "player-1@local.invalid");
+    assert_eq!(preview["login"], "backup-false@example.invalid");
     let expected = preview["expected"].as_str().unwrap();
     assert!(key(expected));
     let digest = format!("{:x}", Sha256::digest(std::fs::read(file).unwrap()));
@@ -1466,7 +1465,7 @@ async fn account_save_cli_preview_metadata_expected_and_snapshot_counts_preserve
         &save.origin.namespace,
         save.origin.account,
         1,
-        "player-1@local.invalid",
+        "backup-false@example.invalid",
         false,
     ))
     .unwrap();
@@ -1543,7 +1542,7 @@ async fn account_save_cli_preview_metadata_expected_and_snapshot_counts_preserve
     assert_eq!(
         local
             .authenticate(
-                "player-1@local.invalid".into(),
+                "backup-false@example.invalid".into(),
                 "replacement-cli-password".into()
             )
             .await
@@ -1554,7 +1553,7 @@ async fn account_save_cli_preview_metadata_expected_and_snapshot_counts_preserve
     assert_eq!(
         historical
             .authenticate(
-                "player-1@local.invalid".into(),
+                "backup-false@example.invalid".into(),
                 "private-cli-password".into()
             )
             .await
@@ -1598,7 +1597,7 @@ async fn account_save_cli_stale_missing_malformed_and_input_changed_fail_before_
     let initial = dump(&db);
     let confirmed = cli_ok(&["preview", state, "data", file], b"");
     assert_eq!(dump(&db), initial);
-    assert_eq!(confirmed["login"], "player-2@local.invalid");
+    assert_eq!(confirmed["login"], "backup-false@example.invalid");
     let expected = confirmed["expected"].as_str().unwrap();
     for token in [
         None,
@@ -1626,7 +1625,7 @@ async fn account_save_cli_stale_missing_malformed_and_input_changed_fail_before_
     assert_eq!(dump(&db), initial);
     assert!(!Path::new(backup).exists());
     std::fs::write(file, &input).unwrap();
-    db.execute("UPDATE credentials SET email='player-2@local.invalid'", [])
+    db.execute("UPDATE credentials SET email='backup-false@example.invalid'", [])
         .unwrap();
     let before = dump(&db);
     let (ok, _, error) = cli(
@@ -2002,7 +2001,7 @@ async fn account_save_cli_truncated_or_broken_acknowledgement_is_nonzero_not_unc
     assert_eq!(
         local
             .authenticate(
-                "player-1@local.invalid".into(),
+                "backup-false@example.invalid".into(),
                 "private-cli-password".into()
             )
             .await
@@ -2031,4 +2030,20 @@ async fn account_save_cli_truncated_or_broken_acknowledgement_is_nonzero_not_unc
     drop(local);
     drop(source);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn account_save_import_uses_exported_email_and_refuses_missing_email_without_changes() {
+    let (root, content, source, save) = fixture().await;
+    assert_eq!(save.email.as_deref(), Some("backup-false@example.invalid"));
+    let local = Store::open(&root.join("email.db"), &content).unwrap();
+    let db = Connection::open(root.join("email.db")).unwrap();
+    let before = dump(&db);
+    let mut legacy = save.clone(); legacy.email = None;
+    assert!(preview(&db, &legacy).err().unwrap().to_string().contains("no account email"));
+    assert_eq!(dump(&db), before);
+    let imported = local.import_account_save(save, "chosen-password".into(), false).await.unwrap();
+    assert_eq!(imported.login, "backup-false@example.invalid");
+    assert_eq!(local.authenticate(imported.login, "chosen-password".into()).await.unwrap(), imported.account);
+    drop(db);drop(local);drop(source);std::fs::remove_dir_all(root).unwrap();
 }

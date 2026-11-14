@@ -102,6 +102,8 @@ pub struct AccountSave {
     pub exported_at: u64,
     pub origin: Origin,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     pub name_chosen: bool,
     pub gold: i32,
     pub fame_balance: i32,
@@ -167,6 +169,7 @@ impl AccountSave {
         Ok(saved)
     }
     pub fn validate(&self) -> Result<()> {
+        if let Some(email) = &self.email {ensure!(accounts::email(email)? == *email, "invalid saved email");}
         ensure!(
             self.format == 1 && self.content == "123.5.1" && self.exported_at > 0,
             "unsupported account save format/content/time"
@@ -384,6 +387,7 @@ pub(crate) fn export(db: &Connection, account: i32, base: [i32; 8]) -> Result<Ac
         |r| r.get(0),
     )?;
     let (unused,spent):(i64,i64)=db.query_row("SELECT count(*) FILTER(WHERE used_request IS NULL),count(*) FILTER(WHERE used_request IS NOT NULL) FROM discord_realm_close_tokens WHERE account=?1",[account],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let email = db.query_row("SELECT email FROM credentials WHERE account=?1", [account], |r| r.get::<_,String>(0)).optional()?;
     let saved = AccountSave {
         format: 1,
         content: "123.5.1".into(),
@@ -391,6 +395,7 @@ pub(crate) fn export(db: &Connection, account: i32, base: [i32; 8]) -> Result<Ac
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs(),
         origin,
+        email,
         name_chosen: name != format!("Guest{account}"),
         name,
         gold,
@@ -547,7 +552,7 @@ pub(crate) fn preview(db: &Connection, save: &AccountSave) -> Result<ImportResul
         r.get(0)
     })?;
     let account = existing.unwrap_or(next);
-    let login = format!("player-{account}@local.invalid");
+    let login = save.email.clone().context("This export has no account email. Export your registered account again before importing.")?;
     let name = if save.name_chosen {
         save.name.clone()
     } else {
