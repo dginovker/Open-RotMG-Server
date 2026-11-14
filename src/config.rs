@@ -427,7 +427,11 @@ mod desktop_tests {
         config.validate(false).unwrap();
         config.bot_llm = true;
         assert!(config.validate(false).is_err());
-        for flag in ["--dev-control", "--shore-bots", "--bot-llm"] {
+        let mut explicit = args.clone();
+        explicit.push("--shore-bots".into());
+        let (enabled, control) = Config::load(&explicit).unwrap();
+        assert!(enabled.shore_bots && !enabled.bot_llm && !control);
+        for flag in ["--dev-control", "--bot-llm"] {
             let mut invalid = args.clone();
             invalid.push(flag.into());
             assert!(Config::load(&invalid).is_err(), "{flag}");
