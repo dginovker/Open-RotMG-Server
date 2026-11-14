@@ -427,15 +427,13 @@ async fn execute(args: &[String], phase: &mut Phase) -> Result<()> {
                 "import/replacement identity changed; re-preview this file and choose the confirmed operation"
             );
             let db = state.join("game.db");
-            if db.exists() {
-                phase.stage("Verified pre-backup failed; game save unchanged, but backup output may exist. Choose a new writable backup path and re-preview before retry.");
-                snapshot(&db, Path::new(backup), &content)?;
-            } else {
-                ensure!(
-                    *operation == "import",
-                    "replacement needs existing database"
-                );
-            }
+            phase.stage("Start the local game once before importing so a verified full backup can be created.");
+            ensure!(
+                db.is_file(),
+                "import requires an existing local save to back up"
+            );
+            phase.stage("Verified pre-backup failed; game save unchanged, but backup output may exist. Choose a new writable backup path and re-preview before retry.");
+            snapshot(&db, Path::new(backup), &content)?;
             phase.mutating("Account import/replacement failed after destination database activation; outcome unknown. Do not retry automatically.");
             let store = Store::open(&db, &content)?;
             let result = store
