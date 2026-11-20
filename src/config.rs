@@ -244,8 +244,8 @@ impl Config {
         }
         if self.desktop {
             ensure!(
-                !control && !self.test_state && !self.behind_proxy,
-                "--desktop forbids development control, prepared state and proxy hosting"
+                !control && !self.test_state,
+                "--desktop forbids development control and prepared state"
             );
             ensure!(!self.bot_llm, "--desktop requires bot_llm:false");
             ensure!(
@@ -453,13 +453,13 @@ mod desktop_tests {
         assert!(config.validate(false).is_err());
     }
     #[test]
-    fn desktop_rejects_proxy_public_origin_and_relative_runtime_paths() {
+    fn desktop_accepts_launcher_proxy_but_rejects_public_origin_and_relative_runtime_paths() {
         let (mut config, _) = Config::load(&["--no-shore-bots".into()]).unwrap();
         config.desktop = true;
         config.validate(false).unwrap();
+        // The launcher's hosting proxy forwards each friend's address so rate limits stay per player.
         config.behind_proxy = true;
-        assert!(config.validate(false).is_err());
-        config.behind_proxy = false;
+        config.validate(false).unwrap();
         config.origin = "https://example.com".into();
         assert!(config.validate(false).is_err());
         config.origin = format!("http://{}", config.bind);
