@@ -4,6 +4,7 @@ use std::ops::Deref;
 #[derive(Default)]
 pub struct Entities {
     values: BTreeMap<i32, Entity>,
+    ids_by_kind: BTreeMap<u16, BTreeSet<i32>>,
     pub(super) promotions: u64,
     shared: usize,
 }
@@ -16,14 +17,45 @@ impl Deref for Entities {
 }
 
 impl Entities {
+    pub(super) fn of_kind(&self, kind: u16) -> impl Iterator<Item = &Entity> {
+        self.ids_by_kind
+            .get(&kind)
+            .into_iter()
+            .flatten()
+            .map(|id| &self.values[id])
+    }
+    fn unindex_kind(&mut self, kind: u16, id: i32) {
+        let ids = self
+            .ids_by_kind
+            .get_mut(&kind)
+            .expect("entity kind missing from index");
+        assert!(ids.remove(&id), "entity {id} missing from kind index");
+        if ids.is_empty() {
+            self.ids_by_kind.remove(&kind);
+        }
+    }
     pub fn insert(&mut self, id: i32, entity: Entity) -> Option<Entity> {
         self.shared += usize::from(matches!(entity.state, EntityState::Shared(_)));
+        let kind = entity.kind;
         let old = self.values.insert(id, entity);
-        self.shared -= usize::from(
-            old.as_ref()
-                .is_some_and(|e| matches!(e.state, EntityState::Shared(_))),
-        );
+        if let Some(previous) = &old {
+            self.shared -= usize::from(matches!(previous.state, EntityState::Shared(_)));
+            self.unindex_kind(previous.kind, id);
+        }
+        assert!(self.ids_by_kind.entry(kind).or_default().insert(id));
         old
+    }
+    pub(super) fn set_kind(&mut self, id: i32, kind: u16) -> &mut Entity {
+        let old = self.values[&id].kind;
+        if old != kind {
+            self.unindex_kind(old, id);
+            assert!(self.ids_by_kind.entry(kind).or_default().insert(id));
+        }
+        let entity = self
+            .get_mut(&id)
+            .expect("entity missing during kind change");
+        entity.kind = kind;
+        entity
     }
     pub fn get_mut(&mut self, id: &i32) -> Option<&mut Entity> {
         let entity = self.values.get_mut(id)?;
@@ -40,6 +72,7 @@ impl Entities {
     }
     pub fn remove(&mut self, id: &i32) -> Option<Entity> {
         let entity = self.values.remove(id)?;
+        self.unindex_kind(entity.kind, *id);
         self.shared -= usize::from(matches!(entity.state, EntityState::Shared(_)));
         Some(entity)
     }

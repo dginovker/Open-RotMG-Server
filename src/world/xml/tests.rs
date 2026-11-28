@@ -108,6 +108,45 @@ fn fixture(body: &str) -> (World, i32, i32) {
 }
 
 #[test]
+fn exist_and_none_exist_use_other_live_entities_of_the_requested_kinds() -> Result<()> {
+    let mut w = flat_nonrealm(Arc::new(crate::world::test_content()));
+    let id = spawn(&mut w, 0x600, 10.5, 10.5);
+    let scope = Scope {
+        identity: w.xml_identity(id)?,
+        issuer: id,
+        order: None,
+        listener: None,
+        generation: 0,
+    };
+    let exists = |w: &World, kinds: &[u16]| behavior::World::exists(w, scope, kinds);
+    assert!(!exists(&w, &[0x600, 0x601])?);
+    let other = spawn(&mut w, 0x601, 15.5, 10.5);
+    assert!(exists(&w, &[0x600, 0x601])?);
+    w.entities.get_mut(&other).unwrap().hp = 0;
+    assert!(!exists(&w, &[0x601])?);
+    w.entities.get_mut(&other).unwrap().hp = 1;
+    assert!(exists(&w, &[0x601])?);
+    w.remove_entity(other);
+    assert!(!exists(&w, &[0x601])?);
+
+    let bag = w.insert_native_entity(
+        0x500,
+        NativeService::Container,
+        Pos { x: 20.5, y: 10.5 },
+        vec![],
+        "existence predicate test",
+    )?;
+    assert_eq!(w.entities[&bag].hp, 0);
+    assert!(exists(&w, &[0x500])?);
+    w.entities.set_kind(bag, 0x503);
+    assert!(!exists(&w, &[0x500])?);
+    assert!(exists(&w, &[0x503])?);
+    w.remove_entity(bag);
+    assert!(!exists(&w, &[0x503])?);
+    Ok(())
+}
+
+#[test]
 fn medusa_grenade_sends_throw_then_aoe_and_applies_damage_on_landing() {
     let mut w = flat_nonrealm(Arc::new(crate::world::test_content()));
     let mut ch = Character::fresh(w.content.get(0x307).unwrap()).unwrap();

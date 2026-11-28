@@ -5555,8 +5555,9 @@ impl World {
             "actual dropped item bag appearance",
         )?;
         let dropped = self.loot_bag(pos, (soulbound || private).then_some(account), vec![kind])?;
-        let bag = self.entities.get_mut(&dropped).unwrap();
-        bag.kind = if soulbound { 0x503 } else { 0x500 };
+        let bag = self
+            .entities
+            .set_kind(dropped, if soulbound { 0x503 } else { 0x500 });
         bag.published = false;
         bag.reserved = true;
         Ok(dropped)

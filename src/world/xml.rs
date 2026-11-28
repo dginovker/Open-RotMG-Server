@@ -1180,11 +1180,12 @@ impl behavior::World for World {
         Ok(f64::from(e.hp) / f64::from(max))
     }
     fn exists(&self, scope: Scope, kinds: &[u16]) -> Result<bool> {
-        self.xml_scope(scope)?;
-        Ok(self.entities.values().any(|e| {
-            e.id != scope.identity.actor
-                && kinds.contains(&e.kind)
-                && (e.hp > 0 || self.content.objects[&e.kind].hp == 0)
+        let actor = self.xml_scope(scope)?;
+        // World-wide transitions must not scan the Realm’s unrelated scenery each tick.
+        Ok(kinds.iter().copied().any(|kind| {
+            self.entities
+                .of_kind(kind)
+                .any(|e| e.id != actor.id && (e.hp > 0 || self.content.objects[&kind].hp == 0))
         }))
     }
     fn ground(&self, scope: Scope) -> Result<u8> {
