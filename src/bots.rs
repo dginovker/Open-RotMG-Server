@@ -752,7 +752,7 @@ impl Brain {
         ensure!(
             v.projectiles
                 .iter()
-                .all(|b| b.speed > 0. && b.lifetime_ms > 0.),
+                .all(|b| b.speed >= 0. && b.lifetime_ms > 0.),
             "projectile trajectory cannot be inferred from observation"
         );
         self.last_tick = Some(v.tick);

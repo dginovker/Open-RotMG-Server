@@ -2260,3 +2260,28 @@ fn cover_attempt_expires_only_while_the_wall_takes_no_damage() {
         "an undamaged wall is set aside"
     );
 }
+
+#[test]
+fn stationary_enemy_shots_are_avoided_not_fatal() {
+    let (c, mut v) = fixture();
+    let mut brain = Brain::new(ARCHETYPES[0], &v);
+    let hazard = center((11, 10));
+    v.projectiles.push(crate::world::view::VisibleProjectile {
+        source_kind: 0xe38,
+        already_hit_player: false,
+        owner: 2,
+        id: 1,
+        start: hazard,
+        position: hazard,
+        angle: 0.,
+        speed: 0.,
+        lifetime_ms: 5000.,
+        amplitude: 0.,
+        frequency: 0.,
+        passes_cover: false,
+        damage: 20,
+        armor_piercing: false,
+    });
+    brain.decide(&v, &c).unwrap();
+    assert!(combat::predicted(&v.projectiles[0], 4.).is_some_and(|p| p.distance(hazard) == 0.));
+}

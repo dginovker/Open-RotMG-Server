@@ -21,6 +21,10 @@ impl Perception {
     }
 }
 pub(super) fn predicted(b: &VisibleProjectile, seconds: f32) -> Option<Pos> {
+    // Stationary shots (e.g. Ghost Ship Anchor) hide their age; treat them as present for the whole horizon.
+    if b.speed == 0. {
+        return Some(b.position);
+    }
     let direction = Pos {
         x: b.angle.cos(),
         y: b.angle.sin(),
