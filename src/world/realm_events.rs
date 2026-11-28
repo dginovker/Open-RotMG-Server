@@ -348,6 +348,111 @@ mod tests {
     }
 
     #[test]
+    fn realm_place_map_encounters_are_reachable_on_foot() -> Result<()> {
+        use crate::content::game::BehaviorKind;
+        use std::collections::VecDeque;
+
+        let content = Arc::new(crate::world::test_content());
+        let game = content.game.as_ref().unwrap();
+        let map = Arc::new(Map {
+            elevation: Some(vec![200; 192 * 192].into()),
+            width: 192,
+            height: 192,
+            cells: vec![
+                crate::content::Cell {
+                    ground: 0x18,
+                    object: None,
+                    config: String::new(),
+                    terrain: 4,
+                    region: 0,
+                };
+                192 * 192
+            ],
+            spawns: vec![(8.5, 8.5)],
+        });
+        for rule in game.realm.as_ref().unwrap().sites.iter().filter(|rule| {
+            rule.role == SiteRole::Event
+                || game.definitions[&rule.kind]
+                    .states
+                    .iter()
+                    .flat_map(|s| &s.behaviors)
+                    .any(|b| b.kind == BehaviorKind::PlaceMap)
+        }) {
+            let mut world = World::in_domain(content.clone(), map.clone(), WorldDomain::Realm)?;
+            world.allocate_site(rule)?;
+            let root = if rule.role == SiteRole::Event {
+                world.reserve_realm_events()?;
+                world.event_waiting = Some(1);
+                world.event_choice = Some(rule.kind);
+                let EventAdmission::Spawned(root) = world.earn_realm_event(1)? else {
+                    bail!("Realm event {:#x} did not summon", rule.kind)
+                };
+                root
+            } else {
+                world
+                    .entities
+                    .values()
+                    .find(|e| e.kind == rule.kind)
+                    .context("missing finite site root")?
+                    .id
+            };
+            let pos = world.entities[&root].pos;
+            let center = (pos.x.floor() as i32, pos.y.floor() as i32);
+            let tile = |(x, y): (i32, i32)| Pos {
+                x: x as f32 + 0.5,
+                y: y as f32 + 0.5,
+            };
+            let shore = (center.0, center.1 + 19);
+            let mut ch = Character::fresh(content.get(crate::content::WIZARD)?)?;
+            ch.account = 1;
+            ch.id = 1;
+            let player = world.enter(ch, None)?;
+            world.players.get_mut(&player).unwrap().pos = tile(shore);
+            for _ in 0..25 {
+                world.now += 50;
+                world.xml_step()?;
+            }
+            let mut reachable = BTreeSet::new();
+            let mut queue = VecDeque::from([shore]);
+            while let Some((x, y)) = queue.pop_front() {
+                let step = tile((x, y));
+                if step.distance(pos) > 24. || !world.walkable(step) || !reachable.insert((x, y)) {
+                    continue;
+                }
+                queue.extend([(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]);
+            }
+            // The Hermit deliberately stays in a small nonwalkable core, but is fought from the shallows.
+            let boss = world.entities[&root].pos;
+            let nearest = reachable
+                .iter()
+                .map(|&cell| tile(cell).distance(boss))
+                .fold(f32::INFINITY, f32::min);
+            let name = &content.objects[&rule.kind].name;
+            println!("{name}: nearest walking distance {nearest:.2}");
+            assert!(
+                nearest <= 5.,
+                "{name} inaccessible within attack range: {nearest:.2}"
+            );
+            let stamp_actor = match rule.kind {
+                0xd61 => 0xd66,
+                0xe37 => 0xe3c,
+                _ => continue,
+            };
+            let stamped = world
+                .entities
+                .values()
+                .find(|e| e.kind == stamp_actor)
+                .with_context(|| format!("{name} PlaceMap actor {stamp_actor:#x} missing"))?;
+            let cell = (stamped.pos.x.floor() as i32, stamped.pos.y.floor() as i32);
+            assert!(
+                reachable.contains(&cell),
+                "{name} PlaceMap actor {stamp_actor:#x} stranded"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn pending_event_does_not_withhold_other_quest_credit() {
         let content = Arc::new(crate::world::test_content());
         let map = Map {
