@@ -248,6 +248,106 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "optimized loaded-Realm CPU comparison"]
+    fn hermit_god_npc_phase() -> Result<()> {
+        use crate::performance::Measure;
+        const PLAYERS: usize = 47;
+        const TICKS: usize = 200;
+
+        let mut directory =
+            Directory::prepared(Arc::new(crate::world::test_content()), 85, 1370, 1)?;
+        let world = &mut directory.worlds[&-3];
+        let center = world
+            .event_reserves
+            .iter()
+            .find(|e| e.root.kind == 0xd61)
+            .context("Hermit event absent")?
+            .root
+            .pos;
+        let candidates: Vec<_> = world.actor_ids.iter().copied().collect();
+        let mut players = Vec::new();
+        for i in 0..PLAYERS {
+            let position = candidates
+                .iter()
+                .cycle()
+                .skip(i * candidates.len() / PLAYERS)
+                .find_map(|id| {
+                    let e = &world.entities[id];
+                    (e.pos.distance(center) > 60. && world.walkable(e.pos)).then_some(e.pos)
+                })
+                .context("no inhabitable spot away from the event")?;
+            let mut ch = Character::fresh(world.content.get(crate::content::WIZARD)?)?;
+            ch.id = i as i32 + 1;
+            ch.account = ch.id;
+            let id = world.enter(ch, None)?;
+            world.players.get_mut(&id).unwrap().pos = position;
+            players.push(id);
+        }
+        println!(
+            "layout={:?} {}x{} actors={} entities={} players={PLAYERS} event={center:?}",
+            world.realm_layout,
+            world.map.width,
+            world.map.height,
+            world.actor_ids.len(),
+            world.entities.len()
+        );
+        let run = |world: &mut World, label| -> Result<()> {
+            let mut times = [0.; TICKS];
+            for ms in &mut times {
+                world.now += 50;
+                let start = Measure::start();
+                world.xml_step()?;
+                world.native_expiry();
+                *ms = start
+                    .finish()
+                    .cpu
+                    .context("thread CPU clock unavailable")?
+                    .as_secs_f64()
+                    * 1000.;
+                // Keep projectile storage bounded without adding combat or networking to the NPC sample.
+                world
+                    .bullets
+                    .retain(|b| ((world.now - b.born) as f32) < b.spec.lifetime);
+            }
+            times.sort_by(f64::total_cmp);
+            println!(
+                "{label}: mean={:.3} p50={:.3} p95={:.3} max={:.3} ms",
+                times.iter().sum::<f64>() / TICKS as f64,
+                times[TICKS / 2],
+                times[TICKS * 95 / 100 - 1],
+                times[TICKS - 1]
+            );
+            Ok(())
+        };
+        // Choose a pending event deterministically; the production site checks and publication still run.
+        world.event_waiting = Some(1);
+        world.event_choice = Some(0xd61);
+        run(world, "baseline")?;
+        let EventAdmission::Spawned(root) = world.earn_realm_event(1)? else {
+            bail!("available Hermit event did not summon");
+        };
+        for (&id, dx) in players.iter().take(2).zip([-8., 8.]) {
+            world.players.get_mut(&id).unwrap().pos = Pos {
+                x: center.x + dx,
+                y: center.y + 7.,
+            };
+        }
+        run(world, "Hermit")?;
+        assert_eq!(world.entities[&root].kind, 0xd61);
+        for kind in [0xd62, 0xd64, 0xd65, 0xd66] {
+            assert!(
+                world.entities.values().any(|e| {
+                    e.kind == kind
+                        && std::iter::successors(*e.parent, |id| *world.entities[id].parent)
+                            .any(|id| id == root)
+                }),
+                "Hermit child {kind:#x} absent after PlaceMap and encounter startup"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn pending_event_does_not_withhold_other_quest_credit() {
         let content = Arc::new(crate::world::test_content());
         let map = Map {
