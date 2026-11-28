@@ -296,6 +296,68 @@ fn recovered_realm_movement_uses_source_speed_and_gods_follow_at_seven_to_ten_ti
 }
 
 #[test]
+fn medusa_wander_repicks_within_distance_budget() {
+    let mut map = flat_map(128);
+    map.elevation = Some(vec![254; map.cells.len()].into());
+    let mut w = World::in_domain(
+        Arc::new(crate::world::test_content()),
+        Arc::new(map),
+        WorldDomain::Realm,
+    )
+    .unwrap();
+    w.prepared_seed = Some(6);
+    let mut ch = Character::fresh(w.content.get(crate::content::WIZARD).unwrap()).unwrap();
+    ch.base[0] = 500;
+    ch.hp = ch.base[0];
+    ch.account = 1;
+    ch.id = 1;
+    let player = w.enter(ch, None).unwrap();
+    let p = w.players.get_mut(&player).unwrap();
+    p.newbie_until = 0;
+    p.pos = Pos { x: 68.5, y: 64.5 };
+    let id = spawn(&mut w, 0x654, 64.5, 64.5);
+    w.xml_step().unwrap();
+    let local = w.xml_game().definitions[&0x654]
+        .states
+        .iter()
+        .flat_map(|s| &s.behaviors)
+        .find(|b| b.kind == K::Wander)
+        .unwrap()
+        .local;
+    let token = *w
+        .xml
+        .motions
+        .keys()
+        .find(|token| token.local == local)
+        .unwrap();
+    let start = w.entities[&id].pos;
+    let mut prev = start;
+    let mut leg = 0.;
+    let mut completed = 0;
+    let mut drift = 0.0_f32;
+    for at in (50..=3000).step_by(50) {
+        w.now = at;
+        w.xml_step().unwrap();
+        let pos = w.entities[&id].pos;
+        let step = prev.distance(pos);
+        assert!((step - 0.1).abs() < 0.0001, "speed at {at}ms: {step}");
+        leg += step;
+        assert!(leg <= 0.8001, "Wander leg traveled {leg} tiles at {at}ms");
+        if !w.xml.motions.contains_key(&token) {
+            assert!(leg >= 0.2999, "Wander leg ended after {leg} tiles");
+            completed += 1;
+            leg = 0.;
+        }
+        drift = drift.max(start.distance(pos));
+        prev = pos;
+    }
+    assert!(completed >= 7, "only {completed} completed Wander legs");
+    assert!(drift < 2.5, "seeded Medusa drifted {drift} tiles");
+    assert!(eligible(&w.players[&player]));
+    println!("Medusa completed {completed} Wander legs; peak drift {drift:.3} tiles");
+}
+
+#[test]
 fn follow_cools_after_target_loss_or_duration_but_tracks_inside_stop_range() {
     for (duration, loses_target) in [("0", true), ("0.4", false)] {
         let (mut w, player, id) = fixture(&format!(

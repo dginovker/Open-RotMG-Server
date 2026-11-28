@@ -49,6 +49,7 @@ struct Motion {
     origin: Pos,
     angle: f64,
     radius: f64,
+    wander_remaining: f64,
     direction: f64,
     anchor: Option<i32>,
     closing: bool,

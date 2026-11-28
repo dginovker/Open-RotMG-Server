@@ -170,19 +170,28 @@ impl World {
         } else {
             None
         };
-        let angle = if b.kind == K::Wander {
-            rng.gen_range(0.0..std::f64::consts::TAU)
-        } else {
-            match b.kind {
-                K::BackAndForth | K::Move => n(b, F::Angle),
-                _ => target.map_or(0., |(_, p)| heading(pos, p)),
+        let (angle, wander_remaining) = match b.kind {
+            K::Wander => {
+                // Authored cadence from Kithio d15f321edcce0ef890001890c6991c25a1b0f718, wServer/logic/behaviors/Wander.cs.
+                let angle = loop {
+                    let x = rng.gen_range(-1..=1);
+                    let y = rng.gen_range(-1..=1);
+                    if (x, y) != (0, 0) {
+                        break f64::from(y).atan2(f64::from(x));
+                    }
+                };
+                (angle, f64::from(rng.gen_range(300..=700)) / 1000.)
             }
+            K::BackAndForth | K::Move => (n(b, F::Angle), 0.),
+            _ => (target.map_or(0., |(_, p)| heading(pos, p)), 0.),
         };
         let goal = if b.kind == K::Charge {
             let Some((_, goal)) = target else {
                 return Ok(false);
             };
             goal
+        } else if b.kind == K::Wander {
+            pos
         } else {
             point(
                 pos,
@@ -246,6 +255,7 @@ impl World {
                 speed,
                 angle,
                 radius,
+                wander_remaining,
                 direction: if b.kind == K::BackAndForth
                     || (b.kind == K::Orbit && flag(b, F::Clockwise))
                 {
@@ -452,13 +462,19 @@ impl World {
             proposed.is_finite(),
             "native motion distance overflow speed={speed} elapsed={elapsed}"
         );
-        let remaining =
-            (f64::from(goal.x) - f64::from(pos.x)).hypot(f64::from(goal.y) - f64::from(pos.y));
-        ensure!(
-            remaining.is_finite(),
-            "nonfinite native motion remaining distance"
-        );
-        let distance = proposed.min(remaining);
+        let (angle, limit) = if b.kind == K::Wander {
+            (m.angle, None)
+        } else {
+            let remaining =
+                (f64::from(goal.x) - f64::from(pos.x)).hypot(f64::from(goal.y) - f64::from(pos.y));
+            ensure!(
+                remaining.is_finite(),
+                "nonfinite native motion remaining distance"
+            );
+            (heading(pos, goal), Some(remaining))
+        };
+        let step_distance = |requested: f64| limit.map_or(requested, |r| requested.min(r));
+        let distance = step_distance(proposed);
         if speed == 0.
             && m.speed > 0.
             && step.active_ms == m.born
@@ -466,21 +482,21 @@ impl World {
             && n(b, F::Acceleration) > 0.
         {
             let probe_speed = m.speed.min(n(b, F::Acceleration) * 0.05);
-            let candidate = point(pos, heading(pos, goal), (probe_speed * 0.05).min(remaining));
+            let candidate = point(pos, angle, step_distance(probe_speed * 0.05));
             ensure!(
                 candidate.x.is_finite() && candidate.y.is_finite(),
                 "unrepresentable initial accelerating motion"
             );
             return self.xml_npc_walkable(step.token.scope, candidate);
         }
-        if remaining <= 0.00001 || speed == 0. {
+        if limit.is_some_and(|r| r <= 0.00001) || speed == 0. {
             return Ok(false);
         }
         if step.delta_ms == 0 {
             if b.kind == K::BackAndForth {
                 return Ok(true);
             }
-            let next = point(pos, heading(pos, goal), (speed * 0.05).min(remaining));
+            let next = point(pos, angle, step_distance(speed * 0.05));
             ensure!(
                 next.x.is_finite() && next.y.is_finite(),
                 "unrepresentable native motion probe x={} y={}",
@@ -501,7 +517,7 @@ impl World {
             }
             return Ok(false);
         }
-        let next = point(pos, heading(pos, goal), distance);
+        let next = point(pos, angle, distance);
         ensure!(
             next.x.is_finite() && next.y.is_finite(),
             "unrepresentable native motion endpoint x={} y={}",
@@ -561,6 +577,13 @@ impl World {
             x: next.x - pos.x,
             y: next.y - pos.y,
         };
+        if b.kind == K::Wander {
+            m.wander_remaining -= f64::from(pos.distance(next));
+            if m.wander_remaining <= 0. {
+                self.xml.motions.remove(&step.token);
+                return Ok(true);
+            }
+        }
         self.xml.motions.insert(step.token, m);
         Ok(true)
     }
