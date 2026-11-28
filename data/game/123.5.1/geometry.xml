@@ -8521,8 +8521,8 @@
     <Anchor x="8" y="8" />
   </Template>
   <Template id="ghost_ship/encounter/wp_full_lake2.jm" width="17" height="17" rotation="fixed" rooms="1" provenance="authored" origin="authored absent ghost_ship/encounter/wp_full_lake2.jm; selected-client definitions; data/README.md candidate geometry qualifications" reason="Independently authored bounded circular arena with explicit selected ground/actor/cover. Original map bytes absent; radius and placement are authored, not authenticated historical values.">
-    <CharMap char="." ground="Dark Water" />
-    <CharMap char="m" ground="Dark Water" object="Beach Spectre Spawner" />
+    <CharMap char="." ground="GhostWater" />
+    <CharMap char="m" ground="GhostWater" object="Beach Spectre Spawner" />
     <Pattern>
       <Row value="        .        " />
       <Row value="     .......     " />
@@ -8545,8 +8545,8 @@
     <Anchor x="8" y="8" />
   </Template>
   <Template id="ghost_ship/encounter/storm_clouds.jm" width="17" height="17" rotation="fixed" rooms="1" provenance="authored" origin="authored absent ghost_ship/encounter/storm_clouds.jm; selected-client definitions; data/README.md candidate geometry qualifications" reason="Independently authored bounded circular arena with explicit selected ground/actor/cover. Original map bytes absent; radius and placement are authored, not authenticated historical values.">
-    <CharMap char="." ground="Dark Water" />
-    <CharMap char="m" ground="Dark Water" object="Tempest Cloud" />
+    <CharMap char="." ground="GhostWater" />
+    <CharMap char="m" ground="GhostWater" object="Tempest Cloud" />
     <Pattern>
       <Row value="        .        " />
       <Row value="     .......     " />
@@ -8640,42 +8640,24 @@
     </Pattern>
     <Anchor x="8" y="8" />
   </Template>
-  <Template id="ocean/oceanEncounter.jm" width="32" height="29" rotation="fixed" rooms="1" provenance="authored" origin="authored absent ocean/oceanEncounter.jm; recovered PlaceMap call and selected properties" reason="Authored concrete overlay: authored water site retains8existing qualified ocean_setpiece.rs spawner offsets; emitter/ownership supplies Hermit God and timed source Whirlpool children; recovered Hermit God Drop (encounters.xml:1571) at the anchor turns into the Ocean Trench Portal once no Hermit God exists; exact lost geometry unavailable, no historical acceptance.">
-    <CharMap char="." ground="Dark Water" />
-    <CharMap char="D" ground="Dark Water" object="Hermit God Drop" />
-    <CharMap char="T" ground="Dark Water" object="Hermit God Tentacle Spawner" />
+  <Template id="ocean/oceanEncounter.jm" width="12" height="12" rotation="fixed" rooms="1" provenance="authored" origin="authored absent ocean/oceanEncounter.jm; recovered PlaceMap call; realm-src@1855c017:common/resources/worlds/SP_Hermit.jm comparator" reason="Preserve the reserved site's walkable shallows and Dark Water boss core. Keep the overlay's eight spawner offsets and put the trench portal maker on the southern shallow approach, not inside the blocked core.">
+    <CharMap char="D" ground="Shallow Water" object="Hermit God Drop" />
+    <CharMap char="T" object="Hermit God Tentacle Spawner" />
     <Pattern>
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value=".............T..T.T............." />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="..........T..........T.........." />
-      <Row value="................D..............." />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="...........T........T..........." />
-      <Row value="...............T................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
-      <Row value="................................" />
+      <Row value="   T  T T   " />
+      <Row value="            " />
+      <Row value="            " />
+      <Row value="            " />
+      <Row value="            " />
+      <Row value="T          T" />
+      <Row value="            " />
+      <Row value="            " />
+      <Row value="            " />
+      <Row value=" T        T " />
+      <Row value="     T      " />
+      <Row value="      D     " />
     </Pattern>
-    <Anchor x="16" y="14" />
+    <Anchor x="6" y="6" />
   </Template>
   <Template id="ghost_ship/floorlight.jm" width="23" height="23" rotation="fixed" rooms="1" provenance="authored" origin="authored absent ghost_ship/floorlight.jm; recovered PlaceMap call and selected properties" reason="Authored concrete overlay: 23-square lantern illumination field; preserve objects; exact lost geometry unavailable, no historical acceptance.">
     <CharMap char="." ground="GhostGround Light" />
